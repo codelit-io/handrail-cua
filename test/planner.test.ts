@@ -429,6 +429,26 @@ describe("planner request provenance", () => {
     }
   });
 
+  it("excludes postcondition-verified inputs from the generated set-value contract", async () => {
+    const request = plannerRequest();
+    request.allowedActions = ["set_value", "request_help"];
+    request.boundInputs = ["memberId"];
+    const exact = await captureOpenAiRequest(request, { includeScreenshot: false });
+    const parsed = JSON.parse(exact.body) as {
+      messages: Array<{ content: string | Array<{ type: string; text?: string }> }>;
+      response_format: { json_schema: { schema: { oneOf: unknown[] } } };
+    };
+    const userMessage = parsed.messages[1];
+    assert.ok(userMessage && Array.isArray(userMessage.content));
+    assert.match(userMessage.content[0]?.text ?? "", /"boundInputs":\["memberId"\]/u);
+    assert.equal(
+      JSON.stringify(parsed.response_format.json_schema.schema.oneOf).includes(
+        '"kind":{"const":"set_value"}',
+      ),
+      false,
+    );
+  });
+
   it("is deterministic for identical exact requests and changes with dynamic request data", async () => {
     const first = await captureOpenAiRequest(plannerRequest());
     const second = await captureOpenAiRequest(plannerRequest());

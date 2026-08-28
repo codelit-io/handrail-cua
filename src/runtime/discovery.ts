@@ -268,6 +268,14 @@ function unique<T>(values: readonly T[]): T[] {
   return [...new Set(values)];
 }
 
+function boundInputNames(run: MutableRun): string[] {
+  return unique(
+    run.steps.flatMap((step) =>
+      step.command === "set_value" && step.value.kind === "input" ? [step.value.name] : [],
+    ),
+  );
+}
+
 function decisionCommand(decision: DiscoveryModelDecision): RuntimeCommand | undefined {
   switch (decision.kind) {
     case "set_value":
@@ -723,6 +731,7 @@ export class DiscoveryEngine {
           goal: request.goal,
           inputs: { ...run.inputs },
           inputSpecs: request.artifact.inputs,
+          boundInputs: boundInputNames(run),
           outputs: { ...run.outputs },
           outputSpecs: request.artifact.outputs,
           observation: run.observation,
@@ -751,7 +760,7 @@ export class DiscoveryEngine {
           );
         }
         decision = ModelDecisionSchema.parse(response.decision);
-        this.#assertFreshDecision(run.observation, decision, allowedActions, request);
+        this.#assertFreshDecision(run, decision, allowedActions, request);
       } catch (error) {
         throw this.#fault(
           "MODEL_INVALID_DECISION",
@@ -796,12 +805,12 @@ export class DiscoveryEngine {
   }
 
   #assertFreshDecision(
-    observation: SurfaceObservation,
+    run: MutableRun,
     decision: ModelDecision,
     allowedActions: readonly DiscoveryModelAction[],
     request: DiscoveryRequest,
   ): asserts decision is DiscoveryModelDecision {
-    if (decision.observationId !== observation.id) {
+    if (decision.observationId !== run.observation.id) {
       throw new Error("The planner referenced a stale or invented observation ID.");
     }
     if (decision.kind === "activate_coordinate") {
@@ -819,10 +828,13 @@ export class DiscoveryEngine {
       if (decision.value.kind !== "input" || !(decision.value.name in request.artifact.inputs)) {
         throw new Error("Set-value discovery accepts declared input references only.");
       }
+      if (boundInputNames(run).includes(decision.value.name)) {
+        throw new Error("The planner attempted to repeat an input binding that already passed.");
+      }
     }
     if (
       "elementRef" in decision &&
-      !observation.elements.some((item) => item.ref === decision.elementRef)
+      !run.observation.elements.some((item) => item.ref === decision.elementRef)
     ) {
       throw new Error("The planner referenced an element absent from the current observation.");
     }
@@ -849,6 +861,10 @@ export class DiscoveryEngine {
           ownerEpoch: run.grant.epoch,
         }).allowed,
     );
+    const alreadyBound = new Set(boundInputNames(run));
+    const hasUnboundInput = Object.keys(request.artifact.inputs).some(
+      (inputName) => !alreadyBound.has(inputName),
+    );
     const candidates: Array<{
       kind: DiscoveryModelAction;
       command?: RuntimeCommand;
@@ -859,7 +875,7 @@ export class DiscoveryEngine {
         kind: "set_value",
         command: "set_value",
         effect: "reversible_write",
-        enabled: !outputsComplete && Object.keys(request.artifact.inputs).length > 0,
+        enabled: !outputsComplete && hasUnboundInput,
       },
       {
         kind: "activate",

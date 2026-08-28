@@ -12,6 +12,8 @@ export interface PlannerRequest {
   goal: string;
   inputs: Record<string, unknown>;
   inputSpecs: Readonly<Record<string, InputSpec>>;
+  /** Inputs already bound and postcondition-verified in this discovery run. */
+  boundInputs?: readonly string[];
   outputs: Record<string, unknown>;
   outputSpecs: Readonly<Record<string, OutputSpec>>;
   observation: SurfaceObservation;
@@ -339,7 +341,8 @@ function ollamaDecisionSchema(request: PlannerRequest): Record<string, unknown> 
   const identifier = { type: "string", pattern: "^[A-Za-z][A-Za-z0-9._-]{1,127}$" };
   const rationale = { type: "string", minLength: 1, maxLength: 280 };
   const elementRefs = request.observation.elements.map((element) => element.ref);
-  const inputNames = Object.keys(request.inputs);
+  const boundInputs = new Set(request.boundInputs ?? []);
+  const inputNames = Object.keys(request.inputs).filter((name) => !boundInputs.has(name));
   const outputNames =
     Object.keys(request.outputs).length > 0 ? Object.keys(request.outputs) : ["savingsBalance"];
   const commonProperties = {
@@ -520,6 +523,7 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
         "Choose exactly one action using only the current observation ID and listed element refs.",
         "Do not invent CSS, JavaScript, URLs, credentials, or element refs.",
         "Use set_value with {kind:'input',name:'memberId'} for the member input.",
+        "Never set an input listed in boundInputs; it already passed its postcondition.",
         "Use extract with output 'savingsBalance' on the Current balance cell in the Savings row.",
         "Use finish only after savingsBalance is present in captured outputs and the member profile is visible.",
         "If the session is expired, the state is unsafe, or no safe action exists, use request_help.",
@@ -536,6 +540,7 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
           text: JSON.stringify({
             goal: modelSafeGoal(request),
             inputs: classifiedAvailability(request.inputs, request.inputSpecs),
+            boundInputs: [...(request.boundInputs ?? [])],
             capturedOutputs: classifiedAvailability(request.outputs, request.outputSpecs),
             allowedActions: request.allowedActions,
             observation: modelSafeObservation(request.observation, request),
@@ -674,6 +679,7 @@ export class OllamaPlanner implements DiscoveryPlanner {
         "Choose exactly one action using only the current observation ID and listed element refs.",
         "Never invent selectors, JavaScript, URLs, credentials, values, or element refs.",
         "Use set_value with the typed memberId input reference for the Member number control.",
+        "Never set an input listed in boundInputs; it already passed its postcondition.",
         "Use extract with output savingsBalance on the Current balance cell in the Savings row.",
         "Progress rule: set the Member number only when its current value differs from memberId; otherwise activate the exact Find Member button; if the Savings Current balance cell is present, extract it before any other action.",
         "Use finish only after savingsBalance exists in capturedOutputs.",
@@ -684,6 +690,7 @@ export class OllamaPlanner implements DiscoveryPlanner {
         content: JSON.stringify({
           goal: modelSafeGoal(request),
           invocationInputs: classifiedAvailability(request.inputs, request.inputSpecs),
+          boundInputs: [...(request.boundInputs ?? [])],
           capturedOutputs: classifiedAvailability(request.outputs, request.outputSpecs),
           allowedActions: request.allowedActions,
           currentObservation: modelSafeObservation(request.observation, request),

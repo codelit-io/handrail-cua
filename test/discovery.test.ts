@@ -325,6 +325,7 @@ class ObservationPlanner implements DiscoveryPlanner {
   readonly #promptRequestHashes: string[] = [];
   readonly observationIds: string[] = [];
   readonly allowedActionSets: ModelDecision["kind"][][] = [];
+  readonly boundInputSets: string[][] = [];
 
   get callCount(): number {
     return this.#callCount;
@@ -350,6 +351,7 @@ class ObservationPlanner implements DiscoveryPlanner {
     this.#callCount += 1;
     this.observationIds.push(request.observation.id);
     this.allowedActionSets.push([...request.allowedActions]);
+    this.boundInputSets.push([...(request.boundInputs ?? [])]);
     const common = {
       decisionId: `decision-${this.#callCount}`,
       observationId: request.observation.id,
@@ -620,6 +622,8 @@ describe("bounded model-driven discovery", () => {
       "observation-4",
     ]);
     assert.deepEqual(planner.allowedActionSets.at(-1), ["finish", "request_help"]);
+    assert.deepEqual(planner.boundInputSets, [[], ["memberId"], ["memberId"], ["memberId"]]);
+    assert.equal(planner.allowedActionSets[1]?.includes("set_value"), false);
     assert.equal(
       planner.allowedActionSets.some((actions) => actions.includes("activate_coordinate")),
       false,

@@ -47,6 +47,8 @@ const SECRET_KEY =
 const PII_KEY =
   /(?:^|[_-])(?:account[_-]?(?:id|number)|address|card[_-]?number|customer[_-]?id|date[_-]?of[_-]?birth|dob|email|first[_-]?name|last[_-]?name|member[_-]?(?:id|number)|national[_-]?id|phone|routing[_-]?number|social[_-]?security|ssn|tax[_-]?id)(?:$|[_-])/iu;
 
+const PAYMENT_CARD_CANDIDATE_PATTERN = /(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)/gu;
+
 interface PatternRule {
   readonly kind: "secret" | "pii";
   readonly name: string;
@@ -119,6 +121,44 @@ const PATTERN_RULES: readonly PatternRule[] = [
     replacement: PII_REDACTION,
   },
 ];
+
+function isPaymentCardCandidate(value: string): boolean {
+  const digits = value.replaceAll(/[ -]/gu, "");
+  if (!/^\d{13,19}$/u.test(digits) || /^(\d)\1+$/u.test(digits)) {
+    return false;
+  }
+
+  let checksum = 0;
+  let doubleDigit = false;
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    const character = digits[index];
+    if (character === undefined) {
+      return false;
+    }
+    let digit = Number(character);
+    if (doubleDigit) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    checksum += digit;
+    doubleDigit = !doubleDigit;
+  }
+  return checksum % 10 === 0;
+}
+
+function redactPaymentCards(input: string): string {
+  return input.replace(PAYMENT_CARD_CANDIDATE_PATTERN, (candidate) =>
+    isPaymentCardCandidate(candidate) ? PII_REDACTION : candidate,
+  );
+}
+
+function countPaymentCards(input: string): number {
+  let count = 0;
+  for (const match of input.matchAll(PAYMENT_CARD_CANDIDATE_PATTERN)) {
+    if (isPaymentCardCandidate(match[0])) count += 1;
+  }
+  return count;
+}
 
 export function classified<T>(value: T, classification: Classification): ClassifiedValue<T> {
   return { classification, value };
@@ -211,7 +251,7 @@ function configuredClassification(
 
 /** Redact known secret and PII shapes in otherwise unclassified text. */
 export function redactText(input: string): string {
-  let redacted = input;
+  let redacted = redactPaymentCards(input);
   for (const rule of PATTERN_RULES) {
     redacted =
       typeof rule.replacement === "string"
@@ -232,6 +272,10 @@ export function findSensitivePatterns(input: string): SensitivePatternFinding[] 
     if (matches && matches.length > 0) {
       findings.push({ kind: rule.kind, pattern: rule.name, count: matches.length });
     }
+  }
+  const paymentCardCount = countPaymentCards(input);
+  if (paymentCardCount > 0) {
+    findings.push({ kind: "pii", pattern: "payment-card", count: paymentCardCount });
   }
   return findings;
 }

@@ -1,6 +1,11 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { type ControlCoordinator, ControlError, type ControlGrant } from "../runtime/control.js";
+import {
+  type ControlCoordinator,
+  ControlError,
+  type ControlGrant,
+  type ControlSnapshot,
+} from "../runtime/control.js";
 import { type RedactedValue, redactText, redactValue } from "../runtime/redaction.js";
 import type { SurfaceAdapter, SurfaceObservation } from "../surface/types.js";
 import type {
@@ -24,6 +29,7 @@ const MAX_REQUEST_BYTES = 16 * 1_024;
 const MAX_SCREENSHOT_BYTES = 20 * 1_024 * 1_024;
 const MAX_CAPTURES_PER_SESSION = 8;
 const MAX_TYPED_CHARACTERS = 4_096;
+const MAX_CONNECTION_RECOVERY_ATTEMPTS = 3;
 const CAPABILITY_FRAGMENT_KEY = "capability";
 const CAPABILITY_HEADER = "x-handrail-capability";
 const SAFE_IDENTIFIER = /^[A-Za-z][A-Za-z0-9._-]{1,127}$/u;
@@ -101,6 +107,7 @@ const OPERATOR_BOOTSTRAP_SCRIPT = `
 
 type OperatorHttpErrorCode =
   | "BAD_REQUEST"
+  | "AUDIT_UNAVAILABLE"
   | "FORBIDDEN"
   | "NOT_FOUND"
   | "POLICY_DENIED"
@@ -136,13 +143,18 @@ interface InterventionRecord {
   readonly automationLeaseTtlMs: number;
   readonly automationId: string;
   readonly capabilityHash: Buffer;
+  /** Serializes authorization, live observation, and action dispatch per intervention. */
+  actionTail: Promise<void>;
+  auditHealthy: boolean;
   operatorGrant?: ControlGrant;
   claimHash?: Buffer;
   latestObservation?: OperatorObservationSummary;
   latestScreenshotPng?: Buffer;
   resumeResult?: OperatorResumeResult;
+  terminalError?: OperatorConsoleError;
   resuming: boolean;
   connected: boolean;
+  connectionRecoveryAttempts: number;
 }
 
 function assertFinitePort(port: number): void {
@@ -155,7 +167,7 @@ function assertLoopbackHost(host: string): void {
   if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
     throw new OperatorConsoleError(
       "FORBIDDEN",
-      "The unauthenticated demo operator console may listen only on loopback.",
+      "The capability-gated operator console may listen only on loopback.",
     );
   }
 }
@@ -328,14 +340,6 @@ function redactedDetails(
   return redacted as Readonly<Record<string, RedactedValue>>;
 }
 
-function effectForOperatorKey(key: string): OperatorAuthorizationContext["effect"] {
-  // Enter and Space can activate an unknown focused control, so they are
-  // conservatively classified as commit operations.
-  if (key === "Enter" || key === "Space") return "commit";
-  if (key === "Backspace" || key === "Delete") return "reversible_write";
-  return "read";
-}
-
 function json(
   response: ServerResponse,
   status: number,
@@ -365,6 +369,8 @@ function errorStatus(error: unknown): number {
     switch (error.code) {
       case "BAD_REQUEST":
         return 400;
+      case "AUDIT_UNAVAILABLE":
+        return 503;
       case "FORBIDDEN":
       case "POLICY_DENIED":
         return 403;
@@ -476,9 +482,33 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       throw new OperatorConsoleError("BAD_REQUEST", "Lease durations must be positive integers.");
     }
 
-    this.#control.assertGrant(input.automationGrant, "automation");
-    this.#control.requestPause(input.automationGrant, reason);
-    const waiting = await this.#control.quiesceAutomation(input.automationGrant);
+    let waiting: ControlSnapshot;
+    if (input.preQuiescedEpoch !== undefined) {
+      if (
+        !Number.isSafeInteger(input.preQuiescedEpoch) ||
+        input.preQuiescedEpoch < 0 ||
+        input.automationGrant.sessionId !== sessionId ||
+        input.automationGrant.actor.kind !== "automation"
+      ) {
+        throw new OperatorConsoleError("BAD_REQUEST", "Pre-quiesced intervention is invalid.");
+      }
+      waiting = this.#control.snapshot(sessionId);
+      if (
+        waiting.phase !== "AWAITING_OPERATOR" ||
+        waiting.owner !== null ||
+        waiting.epoch !== input.preQuiescedEpoch ||
+        input.automationGrant.epoch + 1 !== waiting.epoch
+      ) {
+        throw new OperatorConsoleError(
+          "SESSION_CONFLICT",
+          "Pre-quiesced intervention does not match the current control epoch.",
+        );
+      }
+    } else {
+      this.#control.assertGrant(input.automationGrant, "automation");
+      this.#control.requestPause(input.automationGrant, reason);
+      waiting = await this.#control.quiesceAutomation(input.automationGrant);
+    }
     const interventionCapability = randomBytes(32).toString("base64url");
 
     const record: InterventionRecord = {
@@ -495,19 +525,32 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       automationLeaseTtlMs,
       automationId,
       capabilityHash: digestOpaqueToken(interventionCapability),
+      actionTail: Promise.resolve(),
+      auditHealthy: true,
       resuming: false,
       connected: true,
+      connectionRecoveryAttempts: 0,
     };
     this.#records.set(sessionId, record);
-    await this.#appendAudit(
-      record,
-      "automation_paused",
-      "automation",
-      automationId,
-      waiting.epoch,
-      "Automation paused",
-      { reason },
-    );
+    try {
+      await this.#appendAudit(
+        record,
+        "automation_paused",
+        "automation",
+        automationId,
+        waiting.epoch,
+        "Automation paused",
+        { reason },
+      );
+    } catch (error) {
+      record.connected = false;
+      this.#records.delete(sessionId);
+      await this.#control
+        .failQuiesced(sessionId, waiting.epoch, "Initial operator audit persistence failed.")
+        .catch(() => undefined);
+      await this.#surface.closeSession(sessionId).catch(() => undefined);
+      throw error;
+    }
 
     return {
       runId,
@@ -639,9 +682,19 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
           }
         : {}),
       activities: this.audit(record.input.session.id),
-      canClaim: control.phase === "AWAITING_OPERATOR" && record.connected,
-      canAct: operatorOwns && record.connected && !record.resuming && !record.resumeResult,
-      canResume: operatorOwns && record.connected && !record.resuming && !record.resumeResult,
+      canClaim: control.phase === "AWAITING_OPERATOR" && record.connected && record.auditHealthy,
+      canAct:
+        operatorOwns &&
+        record.connected &&
+        record.auditHealthy &&
+        !record.resuming &&
+        !record.resumeResult,
+      canResume:
+        operatorOwns &&
+        record.connected &&
+        record.auditHealthy &&
+        !record.resuming &&
+        !record.resumeResult,
       connected: record.connected,
     };
   }
@@ -670,12 +723,19 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       summary: validateDisplayText(summary, "audit summary", 280),
       details: redactedDetails(details),
     };
+    if (!record.auditHealthy) {
+      throw new OperatorConsoleError(
+        "AUDIT_UNAVAILABLE",
+        "Durable operator auditing is unavailable; further actions are blocked.",
+      );
+    }
     record.audit.push(event);
     if (!this.#auditSink) return;
 
     try {
       await this.#auditSink({ ...event, details: redactedDetails(event.details) });
     } catch {
+      record.auditHealthy = false;
       record.audit.push({
         schemaVersion: "1.0.0",
         eventId: `operator-audit-${randomUUID()}`,
@@ -688,10 +748,63 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         actorId: "operator-console",
         ownerEpoch,
         action: "audit_sink_failed",
-        summary: "External audit sink failed; the redacted in-memory audit remains available",
+        summary: "Durable audit sink failed; further operator actions are blocked",
         details: {},
       });
+      const failure = new OperatorConsoleError(
+        "AUDIT_UNAVAILABLE",
+        "Durable operator auditing failed closed before further actions.",
+      );
+      record.terminalError = failure;
+      for (const waiter of record.waiters) waiter.reject(failure);
+      record.waiters.clear();
+      throw failure;
     }
+  }
+
+  async #serializeAction<T>(record: InterventionRecord, operation: () => Promise<T>): Promise<T> {
+    const previous = record.actionTail;
+    let release: () => void = () => undefined;
+    record.actionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  async #appendCompletionAudit(
+    record: InterventionRecord,
+    grant: ControlGrant,
+    action: OperatorAuditAction,
+    actor: OperatorAuditEvent["actor"],
+    actorId: string,
+    ownerEpoch: number,
+    summary: string,
+    details: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    try {
+      await this.#appendAudit(record, action, actor, actorId, ownerEpoch, summary, details);
+    } catch (error) {
+      await this.#control
+        .fail(grant, "Durable audit completion failed after an operator action.")
+        .catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async #stopClaimAfterDurabilityFailure(
+    _record: InterventionRecord,
+    grant: ControlGrant,
+    error: unknown,
+  ): Promise<never> {
+    await this.#control
+      .fail(grant, "Durable operator evidence became unavailable.")
+      .catch(() => undefined);
+    throw error;
   }
 
   #timestamp(): string {
@@ -708,13 +821,30 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         throw new Error("Surface adapter returned an observation for a replacement session.");
       }
       record.connected = true;
+      record.connectionRecoveryAttempts = 0;
       record.latestObservation = observationSummary(observation);
       record.latestScreenshotPng = Buffer.from(observation.screenshotPng);
       return observation;
     } catch (error) {
       record.connected = false;
+      record.connectionRecoveryAttempts = Math.min(
+        MAX_CONNECTION_RECOVERY_ATTEMPTS,
+        record.connectionRecoveryAttempts + 1,
+      );
       throw error;
     }
+  }
+
+  async #recoverTransientConnection(record: InterventionRecord): Promise<void> {
+    if (
+      record.connected ||
+      record.resuming ||
+      record.resumeResult ||
+      record.connectionRecoveryAttempts >= MAX_CONNECTION_RECOVERY_ATTEMPTS
+    ) {
+      return;
+    }
+    await this.#observe(record).catch(() => undefined);
   }
 
   async #claim(
@@ -731,23 +861,45 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       throw new ControlError("CONTROL_LOST", "The intervention is already returning control.");
     }
 
+    const predictedOperatorEpoch = snapshot.epoch + 1;
+    const claimId = randomBytes(32).toString("base64url");
+    await this.#appendAudit(
+      record,
+      "control_claim_authorized",
+      "operator",
+      operatorId,
+      snapshot.epoch,
+      "Operator control claim authorized for the current epoch",
+      { expectedEpoch },
+    );
     const grant = this.#control.claimOperator(
       record.input.session.id,
       operatorId,
       record.operatorLeaseTtlMs,
     );
-    const claimId = randomBytes(32).toString("base64url");
+    if (grant.epoch !== predictedOperatorEpoch) {
+      return this.#stopClaimAfterDurabilityFailure(
+        record,
+        grant,
+        new ControlError("CONTROL_LOST", "The operator claim epoch changed unexpectedly."),
+      );
+    }
+    try {
+      await this.#appendAudit(
+        record,
+        "control_claimed",
+        "operator",
+        operatorId,
+        grant.epoch,
+        "Control transferred to operator",
+        { from: "none", to: "operator" },
+      );
+    } catch (error) {
+      return this.#stopClaimAfterDurabilityFailure(record, grant, error);
+    }
+    this.#control.assertGrant(grant, "operator");
     record.operatorGrant = grant;
     record.claimHash = digestOpaqueToken(claimId);
-    await this.#appendAudit(
-      record,
-      "control_claimed",
-      "operator",
-      operatorId,
-      grant.epoch,
-      "Control transferred to operator",
-      { from: "none", to: "operator" },
-    );
     return {
       claimId,
       sessionId: record.input.session.id,
@@ -757,6 +909,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
   }
 
   #requireClaim(record: InterventionRecord, body: Readonly<Record<string, unknown>>): ControlGrant {
+    if (record.terminalError) throw record.terminalError;
     if (record.resuming || record.resumeResult) {
       throw new ControlError("CONTROL_LOST", "The operator claim is stale.");
     }
@@ -780,7 +933,8 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     action: OperatorAuthorizationContext["action"],
     effect: OperatorAuthorizationContext["effect"],
     details: Readonly<Record<string, unknown>>,
-  ): Promise<string> {
+  ): Promise<{ readonly authorization: string; readonly currentUrl: string }> {
+    const observation = await this.#observe(record);
     const context: OperatorAuthorizationContext = {
       requestedAt: this.#timestamp(),
       runId: record.runId,
@@ -793,6 +947,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         viewport: { ...record.input.session.viewport },
       },
       sessionId: record.input.session.id,
+      currentUrl: observation.url,
       ownerEpoch: grant.epoch,
       operatorId: grant.actor.id,
       operatorLeaseExpiresAt: grant.expiresAt,
@@ -831,7 +986,20 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         "Operator authorization returned an invalid grant and failed closed.",
       );
     }
-    return authorization;
+    try {
+      await this.#appendAudit(
+        record,
+        "operator_action_authorized",
+        "operator",
+        grant.actor.id,
+        grant.epoch,
+        "Operator action authorized before surface dispatch",
+        { action, effect, policyGrantMode: authorization, ...redactedDetails(details) },
+      );
+    } catch (error) {
+      return this.#stopClaimAfterDurabilityFailure(record, grant, error);
+    }
+    return { authorization, currentUrl: observation.url };
   }
 
   async #click(
@@ -841,11 +1009,13 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     const grant = this.#requireClaim(record, body);
     const x = requiredNumber(body, "x");
     const y = requiredNumber(body, "y");
+    const clickX = Math.round(x);
+    const clickY = Math.round(y);
     if (
       x < 0 ||
       y < 0 ||
-      x > record.input.session.viewport.width ||
-      y > record.input.session.viewport.height
+      clickX >= record.input.session.viewport.width ||
+      clickY >= record.input.session.viewport.height
     ) {
       throw new OperatorConsoleError(
         "BAD_REQUEST",
@@ -855,21 +1025,34 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     // A coordinate is not bound to a semantic target, so it may activate a
     // submit control and must carry the most conservative effect class.
     const effect = "commit";
-    const authorization = await this.#authorize(record, grant, "activate_coordinate", effect, {
-      x: Math.round(x),
-      y: Math.round(y),
-    });
-    const receipt = await this.#surface.clickAt(record.input.session.id, x, y, grant);
-    await this.#appendAudit(
+    const { authorization, currentUrl } = await this.#authorize(
       record,
+      grant,
+      "activate_coordinate",
+      effect,
+      {
+        x: clickX,
+        y: clickY,
+      },
+    );
+    const receipt = await this.#surface.clickAt(
+      record.input.session.id,
+      clickX,
+      clickY,
+      grant,
+      currentUrl,
+    );
+    await this.#appendCompletionAudit(
+      record,
+      grant,
       "operator_clicked",
       "operator",
       grant.actor.id,
       grant.epoch,
       "Operator clicked the live session",
       {
-        x: Math.round(x),
-        y: Math.round(y),
+        x: clickX,
+        y: clickY,
         policyAction: "activate_coordinate",
         effect,
         policyGrantMode: authorization,
@@ -886,13 +1069,21 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     const grant = this.#requireClaim(record, body);
     const value = requiredString(body, "value", MAX_TYPED_CHARACTERS);
     const characterCount = Array.from(value).length;
-    const effect = "reversible_write";
-    const authorization = await this.#authorize(record, grant, "type", effect, {
+    // Typing can synchronously submit or trigger autosave handlers on an
+    // unknown focused control, so generic operator input is a commit.
+    const effect = "commit";
+    const { authorization, currentUrl } = await this.#authorize(record, grant, "type", effect, {
       characterCount,
     });
-    const receipt = await this.#surface.typeFocused(record.input.session.id, value, grant);
-    await this.#appendAudit(
+    const receipt = await this.#surface.typeFocused(
+      record.input.session.id,
+      value,
+      grant,
+      currentUrl,
+    );
+    await this.#appendCompletionAudit(
       record,
+      grant,
       "operator_typed",
       "operator",
       grant.actor.id,
@@ -921,11 +1112,26 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         "Key is not permitted by the operator console.",
       );
     }
-    const effect = effectForOperatorKey(key);
-    const authorization = await this.#authorize(record, grant, "press_key", effect, { key });
-    const receipt = await this.#surface.pressKey(record.input.session.id, key, grant);
-    await this.#appendAudit(
+    // Even focus traversal can fire blur/change autosave handlers. A generic
+    // key press therefore requires commit authority regardless of the key.
+    const effect = "commit";
+    const { authorization, currentUrl } = await this.#authorize(
       record,
+      grant,
+      "press_key",
+      effect,
+      { key },
+    );
+    const receipt = await this.#surface.pressKey(
+      record.input.session.id,
+      key,
+      grant,
+      undefined,
+      currentUrl,
+    );
+    await this.#appendCompletionAudit(
+      record,
+      grant,
       "operator_pressed_key",
       "operator",
       grant.actor.id,
@@ -947,10 +1153,26 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     body: Readonly<Record<string, unknown>>,
   ): Promise<Readonly<Record<string, unknown>>> {
     const grant = this.#requireClaim(record, body);
+    if (record.captures.length >= MAX_CAPTURES_PER_SESSION) {
+      throw new OperatorConsoleError(
+        "SESSION_CONFLICT",
+        `This intervention has reached its ${MAX_CAPTURES_PER_SESSION}-capture evidence limit.`,
+      );
+    }
     const effect = "read";
-    const authorization = await this.#authorize(record, grant, "capture_evidence", effect, {});
-    const screenshotPng = await this.#control.withControl(grant, () =>
-      this.#surface.captureEvidence(record.input.session.id, "operator-handoff"),
+    const { authorization, currentUrl } = await this.#authorize(
+      record,
+      grant,
+      "capture_evidence",
+      effect,
+      {},
+    );
+    const screenshotPng = await this.#surface.captureEvidence(
+      record.input.session.id,
+      "operator-handoff",
+      undefined,
+      currentUrl,
+      grant,
     );
     assertPng(screenshotPng);
     const sha256 = createHash("sha256").update(screenshotPng).digest("hex");
@@ -966,12 +1188,28 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       screenshotPng: Buffer.from(screenshotPng),
     };
     record.captures.push(capture);
-    if (record.captures.length > MAX_CAPTURES_PER_SESSION) record.captures.shift();
     if (this.#captureSink) {
-      await this.#captureSink({ ...capture, screenshotPng: Buffer.from(capture.screenshotPng) });
+      try {
+        await this.#captureSink({ ...capture, screenshotPng: Buffer.from(capture.screenshotPng) });
+      } catch {
+        record.captures.splice(
+          record.captures.findIndex((candidate) => candidate.id === capture.id),
+          1,
+        );
+        const failure = new OperatorConsoleError(
+          "AUDIT_UNAVAILABLE",
+          "Durable operator evidence persistence failed; the session was stopped.",
+        );
+        record.auditHealthy = false;
+        record.terminalError = failure;
+        for (const waiter of record.waiters) waiter.reject(failure);
+        record.waiters.clear();
+        return this.#stopClaimAfterDurabilityFailure(record, grant, failure);
+      }
     }
-    await this.#appendAudit(
+    await this.#appendCompletionAudit(
       record,
+      grant,
       "evidence_captured",
       "operator",
       grant.actor.id,
@@ -1016,12 +1254,71 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         return { observation, checkpoint };
       });
 
+      if (!fresh.checkpoint.passed) {
+        try {
+          await this.#appendAudit(
+            record,
+            "resume_checkpoint_failed",
+            "operator",
+            operatorGrant.actor.id,
+            operatorGrant.epoch,
+            "Return to automation was blocked by the recovery checkpoint",
+            { checkpointPassed: false, checkpointObserved: fresh.checkpoint.observed },
+          );
+        } catch (error) {
+          return this.#stopClaimAfterDurabilityFailure(record, operatorGrant, error);
+        }
+        throw new OperatorConsoleError(
+          "SESSION_CONFLICT",
+          "Recovery checkpoint did not pass; operator control is retained.",
+        );
+      }
+
+      const predictedAutomationEpoch = operatorGrant.epoch + 1;
+      try {
+        await this.#appendAudit(
+          record,
+          "return_control_authorized",
+          "operator",
+          operatorGrant.actor.id,
+          operatorGrant.epoch,
+          "Return to automation authorized after a passing recovery checkpoint",
+          { checkpointPassed: true },
+        );
+      } catch (error) {
+        return this.#stopClaimAfterDurabilityFailure(record, operatorGrant, error);
+      }
+
       this.#control.requestResume(operatorGrant);
       const automationGrant = this.#control.returnToAutomation(
         operatorGrant,
         record.automationId,
         record.automationLeaseTtlMs,
       );
+      if (automationGrant.epoch !== predictedAutomationEpoch) {
+        return this.#stopClaimAfterDurabilityFailure(
+          record,
+          automationGrant,
+          new ControlError("CONTROL_LOST", "The automation return epoch changed unexpectedly."),
+        );
+      }
+      try {
+        await this.#appendAudit(
+          record,
+          "control_returned",
+          "system",
+          "operator-console",
+          automationGrant.epoch,
+          "Control returned to automation after a fresh observation and checkpoint",
+          {
+            freshObservationId: fresh.observation.id,
+            checkpointPassed: fresh.checkpoint.passed,
+          },
+        );
+      } catch (error) {
+        return this.#stopClaimAfterDurabilityFailure(record, automationGrant, error);
+      }
+      this.#control.assertGrant(automationGrant, "automation");
       const result: OperatorResumeResult = {
         runId: record.runId,
         sessionId: record.input.session.id,
@@ -1031,19 +1328,6 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         checkpoint: fresh.checkpoint,
       };
       record.resumeResult = result;
-      await this.#appendAudit(
-        record,
-        "control_returned",
-        "system",
-        "operator-console",
-        automationGrant.epoch,
-        "Control returned to automation after a fresh observation and checkpoint",
-        {
-          freshObservationId: fresh.observation.id,
-          checkpointPassed: fresh.checkpoint.passed,
-          checkpointObserved: fresh.checkpoint.observed,
-        },
-      );
       for (const waiter of record.waiters) waiter.resolve(result);
       record.waiters.clear();
       return {
@@ -1060,6 +1344,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
 
   #waitForResume(record: InterventionRecord, signal?: AbortSignal): Promise<OperatorResumeResult> {
     if (record.resumeResult) return Promise.resolve(record.resumeResult);
+    if (record.terminalError) return Promise.reject(record.terminalError);
     if (this.#closed) {
       return Promise.reject(new OperatorConsoleError("SERVER_CLOSED", "Operator console closed."));
     }
@@ -1155,29 +1440,35 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     }
     this.#requireCapability(request, record);
     if (request.method === "GET" && action === "state") {
+      if (!record.connected) {
+        await this.#serializeAction(record, () => this.#recoverTransientConnection(record));
+      }
       json(response, 200, this.#state(record));
       return;
     }
     if (request.method === "GET" && action === "screenshot") {
-      const control = this.#controlSnapshot(record.input.session.id);
-      const mustUseCachedScreenshot =
-        record.resuming || (control.owner?.kind === "automation" && Boolean(record.resumeResult));
-      let screenshotPng: Buffer;
-      let summary: OperatorObservationSummary;
-      if (mustUseCachedScreenshot) {
-        if (!record.latestScreenshotPng || !record.latestObservation) {
-          throw new ControlError(
-            "CONTROL_LOST",
-            "A live screenshot cannot be refreshed while automation owns the session.",
-          );
+      const { screenshotPng, summary } = await this.#serializeAction(record, async () => {
+        const control = this.#controlSnapshot(record.input.session.id);
+        const mustUseCachedScreenshot =
+          record.resuming || (control.owner?.kind === "automation" && Boolean(record.resumeResult));
+        if (mustUseCachedScreenshot) {
+          if (!record.latestScreenshotPng || !record.latestObservation) {
+            throw new ControlError(
+              "CONTROL_LOST",
+              "A live screenshot cannot be refreshed while automation owns the session.",
+            );
+          }
+          return {
+            screenshotPng: record.latestScreenshotPng,
+            summary: record.latestObservation,
+          };
         }
-        screenshotPng = record.latestScreenshotPng;
-        summary = record.latestObservation;
-      } else {
         const observation = await this.#observe(record);
-        screenshotPng = observation.screenshotPng;
-        summary = observationSummary(observation);
-      }
+        return {
+          screenshotPng: observation.screenshotPng,
+          summary: observationSummary(observation),
+        };
+      });
       assertPng(screenshotPng);
       response.writeHead(200, {
         "Content-Type": "image/png",
@@ -1199,22 +1490,22 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     let result: Readonly<Record<string, unknown>>;
     switch (action) {
       case "claim":
-        result = await this.#claim(record, body);
+        result = await this.#serializeAction(record, () => this.#claim(record, body));
         break;
       case "click":
-        result = await this.#click(record, body);
+        result = await this.#serializeAction(record, () => this.#click(record, body));
         break;
       case "type":
-        result = await this.#typeFocused(record, body);
+        result = await this.#serializeAction(record, () => this.#typeFocused(record, body));
         break;
       case "key":
-        result = await this.#pressKey(record, body);
+        result = await this.#serializeAction(record, () => this.#pressKey(record, body));
         break;
       case "capture":
-        result = await this.#capture(record, body);
+        result = await this.#serializeAction(record, () => this.#capture(record, body));
         break;
       case "resume":
-        result = await this.#resume(record, body);
+        result = await this.#serializeAction(record, () => this.#resume(record, body));
         break;
       default:
         throw new OperatorConsoleError("NOT_FOUND", "Operator action not found.");

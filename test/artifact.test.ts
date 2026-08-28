@@ -254,7 +254,7 @@ describe("capability artifact contracts", () => {
       revision: artifact.revision,
       digest: artifact.digest,
       approvedBy: "reviewer-01",
-      approvedAt: "2026-08-27T17:00:00.000Z",
+      approvedAt: CREATED_AT,
       expiresAt: "2026-08-27T19:00:00.000Z",
     };
     assert.equal(
@@ -266,6 +266,7 @@ describe("capability artifact contracts", () => {
       { ...approval, artifactId: "another-artifact" },
       { ...approval, revision: artifact.revision + 1 },
       { ...approval, digest: "b".repeat(64) },
+      { ...approval, approvedAt: "2026-08-27T17:59:59.999Z" },
       {
         ...approval,
         approvedAt: "2026-08-27T20:00:00.000Z",
@@ -357,6 +358,41 @@ describe("artifact safety linter", () => {
     );
   });
 
+  it("uses shared secret and PII detection for artifact values and object keys", () => {
+    const providerKey = `sk-proj-${"a".repeat(16)}`;
+    const githubKey = `ghp_${"C".repeat(20)}`;
+    const jwt = "eyJabcdefgh.ijklmnop.qrstuvwx";
+    const awsKey = `AKIA${"B".repeat(16)}`;
+    const phone = "303-555-0100";
+    const card = "4242 4242 4242 4242";
+    const draft = validDraft();
+    const lookupButton = draft.targets.lookupButton;
+    const memberField = draft.targets.memberField;
+    assert.ok(lookupButton);
+    assert.ok(memberField);
+    draft.description = `Provider credential ${providerKey}`;
+    draft.purpose = `Signed token ${jwt}`;
+    draft.provenance.provider = awsKey;
+    draft.provenance.modelId = githubKey;
+    lookupButton.robustnessRationale = `Call ${phone} for review.`;
+    memberField.description = `Card ${card}`;
+    draft.targets[providerKey] = structuredClone(memberField);
+
+    const result = lintArtifact(draft);
+    const sensitiveIssues = result.issues.filter((entry) => entry.code === "SENSITIVE_LITERAL");
+    assert.equal(result.ok, false);
+    assert.ok(sensitiveIssues.length >= 7);
+    const renderedIssues = JSON.stringify(sensitiveIssues);
+    for (const secret of [providerKey, githubKey, jwt, awsKey, phone, card]) {
+      assert.equal(renderedIssues.includes(secret), false);
+    }
+    assert.match(renderedIssues, /sensitive-key/u);
+
+    const benign = validDraft();
+    benign.description = "A benign password field and non-card 4242 4242 4242 4241.";
+    assert.equal(lintArtifact(benign).ok, true);
+  });
+
   it("rejects a step with no verified postcondition", () => {
     const draft = structuredClone(validDraft()) as unknown as {
       steps: Array<Record<string, unknown>>;
@@ -430,6 +466,47 @@ describe("artifact safety linter", () => {
     const result = lintArtifact(draft);
     assert.ok(result.issues.some((entry) => entry.code === "UNKNOWN_TARGET"));
     assert.ok(result.issues.some((entry) => entry.code === "ROUTE_NOT_ALLOWED"));
+  });
+
+  it("accepts only bounded fixed-width contract patterns and rejects native-regex operators", () => {
+    const valid = validDraft();
+    assert.equal(lintArtifact(valid).ok, true);
+
+    const nestedQuantifier = validDraft();
+    const nestedSpec = nestedQuantifier.contract.inputs.memberId;
+    assert.ok(nestedSpec?.validator.kind === "string");
+    nestedSpec.validator.pattern = "^(a+)+$";
+    nestedSpec.validator.maxLength = 32;
+    let result = lintArtifact(nestedQuantifier);
+    assert.ok(result.issues.some((entry) => entry.code === "INVALID_REGEX"));
+    assert.throws(
+      () => compileArtifact(nestedQuantifier),
+      (error: unknown) =>
+        error instanceof ArtifactCompilationError &&
+        error.issues.some((entry) => entry.code === "INVALID_REGEX"),
+    );
+
+    const missingBound = validDraft();
+    const unboundedSpec = missingBound.contract.inputs.memberId;
+    assert.ok(unboundedSpec?.validator.kind === "string");
+    delete unboundedSpec.validator.maxLength;
+    result = lintArtifact(missingBound);
+    assert.ok(result.issues.some((entry) => entry.code === "INVALID_REGEX"));
+
+    const textRegex = validDraft();
+    textRegex.success = {
+      kind: "all",
+      predicates: [
+        { kind: "output_valid", output: "savingsBalance" },
+        {
+          kind: "target_text_matches",
+          target: "resultsPanel",
+          matcher: { mode: "regex", value: "^(a+)+$", caseSensitive: true },
+        },
+      ],
+    };
+    result = lintArtifact(textRegex);
+    assert.ok(result.issues.some((entry) => entry.code === "INVALID_REGEX"));
   });
 });
 

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type InputSpec,
   type ModelDecision,
@@ -22,15 +22,125 @@ export interface PlannerResponse {
   decision: ModelDecision;
   provider: string;
   model: string;
+  /** Domain-separated SHA-256 of the exact serialized request body for this decision. */
+  promptRequestHash: string;
   usage?: { inputTokens?: number; outputTokens?: number };
 }
+
+export type PlannerTransport = "native-ollama" | "openai-compatible" | "scripted" | "forbidden";
 
 export interface DiscoveryPlanner {
   readonly provider: string;
   readonly model: string;
+  readonly transport: PlannerTransport;
   readonly live: boolean;
   readonly callCount: number;
+  /**
+   * Domain-separated SHA-256 trace of every exact serialized planner request
+   * recorded so far, in call order. Response data is deliberately excluded.
+   */
+  readonly promptHash: string;
+  /** Returns the request trace beginning at a previously captured call count. */
+  promptHashSince(callCount: number): string;
   decide(request: PlannerRequest): Promise<PlannerResponse>;
+}
+
+const PROMPT_REQUEST_HASH_DOMAIN = "handrail.discovery-planner.request.v1";
+const PROMPT_TRACE_HASH_DOMAIN = "handrail.discovery-planner.trace.v1";
+
+function updateFramed(hash: ReturnType<typeof createHash>, value: string | Uint8Array): void {
+  const bytes = typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(value);
+  const length = Buffer.alloc(8);
+  length.writeBigUInt64BE(BigInt(bytes.byteLength));
+  hash.update(length);
+  hash.update(bytes);
+}
+
+export function computePromptRequestHash(
+  transport: PlannerTransport,
+  exactSerializedBody: string,
+): string {
+  const hash = createHash("sha256");
+  updateFramed(hash, PROMPT_REQUEST_HASH_DOMAIN);
+  updateFramed(hash, transport);
+  updateFramed(hash, exactSerializedBody);
+  return hash.digest("hex");
+}
+
+function traceHashFromRequestHashes(
+  transport: PlannerTransport,
+  requestHashes: readonly string[],
+): string {
+  const hash = createHash("sha256");
+  updateFramed(hash, PROMPT_TRACE_HASH_DOMAIN);
+  updateFramed(hash, transport);
+  for (const requestHash of requestHashes) {
+    if (!/^[a-f0-9]{64}$/u.test(requestHash)) {
+      throw new TypeError("Prompt request hashes must be lowercase SHA-256 values.");
+    }
+    updateFramed(hash, Buffer.from(requestHash, "hex"));
+  }
+  return hash.digest("hex");
+}
+
+export function computePromptTraceHashFromRequestHashes(
+  transport: PlannerTransport,
+  requestHashes: readonly string[],
+): string {
+  return traceHashFromRequestHashes(transport, requestHashes);
+}
+
+/**
+ * Computes the same provenance trace exposed by a planner. The caller must
+ * supply the exact UTF-8 JSON strings used as request bodies, without parsing
+ * and reserializing them.
+ */
+export function computePromptTraceHash(
+  transport: PlannerTransport,
+  exactSerializedBodies: readonly string[],
+): string {
+  return traceHashFromRequestHashes(
+    transport,
+    exactSerializedBodies.map((body) => computePromptRequestHash(transport, body)),
+  );
+}
+
+class PromptTrace {
+  readonly #transport: PlannerTransport;
+  readonly #requestHashes: string[] = [];
+
+  constructor(transport: PlannerTransport) {
+    this.#transport = transport;
+  }
+
+  record(exactSerializedBody: string): string {
+    const requestHash = computePromptRequestHash(this.#transport, exactSerializedBody);
+    this.#requestHashes.push(requestHash);
+    return requestHash;
+  }
+
+  get hash(): string {
+    return traceHashFromRequestHashes(this.#transport, this.#requestHashes);
+  }
+
+  hashSince(callCount: number): string {
+    if (
+      !Number.isSafeInteger(callCount) ||
+      callCount < 0 ||
+      callCount > this.#requestHashes.length
+    ) {
+      throw new RangeError("Prompt trace call count is outside the recorded request range.");
+    }
+    return traceHashFromRequestHashes(this.#transport, this.#requestHashes.slice(callCount));
+  }
+}
+
+/** A syntactically valid provider response that violates the current decision contract. */
+export class PlannerDecisionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PlannerDecisionError";
+  }
 }
 
 export interface OpenAiCompatiblePlannerOptions {
@@ -55,6 +165,8 @@ export interface OllamaPlannerOptions {
   baseUrl?: string;
   model: string;
   includeScreenshot?: boolean;
+  /** Required when an Ollama-compatible service is not bound to loopback. */
+  allowRemoteDataEgress?: boolean;
   timeoutMs?: number;
   fetchImplementation?: typeof fetch;
 }
@@ -128,6 +240,21 @@ function sanitizeModelText(
   return output;
 }
 
+function sanitizeContextValue(
+  value: unknown,
+  markers: readonly [string, string][],
+): string | number | boolean | string[] | undefined {
+  if (typeof value === "string") return sanitizeModelText(value.slice(0, 1_000), markers);
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 24)
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => sanitizeModelText(item.slice(0, 500), markers));
+  }
+  return undefined;
+}
+
 function modelSafeObservation(
   observation: SurfaceObservation,
   request: PlannerRequest,
@@ -135,31 +262,49 @@ function modelSafeObservation(
   const markers = sensitiveMarkers(request);
   return {
     observationId: observation.id,
-    route: observation.route,
+    route: sanitizeModelText(observation.route.slice(0, 1_000), markers),
     title: sanitizeModelText(observation.title, markers),
     viewport: observation.viewport,
-    visibleText: sanitizeModelText(observation.visibleText.slice(0, 8_000), markers),
-    elements: observation.elements.map((element) => ({
+    // Raw page text can contain values that have not yet been associated with
+    // a declared output. The planner gets structural availability, not that text.
+    visibleTextAvailable: observation.visibleText.trim().length > 0,
+    elements: observation.elements.slice(0, 500).map((element) => ({
       ref: element.ref,
-      framePath: element.framePath,
-      role: element.role,
-      name: sanitizeModelText(element.name, markers),
-      text: sanitizeModelText(element.text, markers),
-      value: sanitizeModelText(element.value, markers),
-      inputType: element.inputType,
+      framePath: element.framePath
+        .slice(0, 12)
+        .map((segment) => sanitizeModelText(segment.slice(0, 500), markers)),
+      role:
+        element.role === undefined
+          ? undefined
+          : sanitizeModelText(element.role.slice(0, 200), markers),
+      ...(element.interactive ? { name: sanitizeModelText(element.name, markers) } : {}),
+      valueAvailable: typeof element.value === "string" && element.value.length > 0,
+      inputType:
+        element.inputType === undefined
+          ? undefined
+          : sanitizeModelText(element.inputType.slice(0, 200), markers),
       enabled: element.enabled,
       center: {
         x: Number((element.bounds.x + element.bounds.width / 2).toFixed(4)),
         y: Number((element.bounds.y + element.bounds.height / 2).toFixed(4)),
       },
       context: Object.fromEntries(
-        Object.entries(element.context).map(([key, value]) => [
-          key,
-          typeof value === "string" ? sanitizeModelText(value, markers) : value,
-        ]),
+        Object.entries(element.context)
+          // Full table rows can contain unrelated PII/internal cell values. Stable
+          // relational labels are sufficient for discovery; omit raw row payloads.
+          .filter(([key]) => key !== "rowText")
+          .slice(0, 24)
+          .flatMap(([key, value]) => {
+            const sanitized = sanitizeContextValue(value, markers);
+            return sanitized === undefined ? [] : [[key, sanitized] as const];
+          }),
       ),
     })),
   };
+}
+
+function modelSafeGoal(request: PlannerRequest): string {
+  return sanitizeModelText(request.goal.slice(0, 2_000), sensitiveMarkers(request));
 }
 
 function isLoopbackEndpoint(baseUrl: string): boolean {
@@ -176,7 +321,9 @@ function extractContent(response: ChatCompletionResponse): string {
   const content = response.choices?.[0]?.message?.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map((part) => part.text ?? "").join("");
-  throw new Error(response.error?.message ?? "The model response contained no message content.");
+  throw new PlannerDecisionError(
+    response.error?.message ?? "The model response contained no message content.",
+  );
 }
 
 function parseDecision(content: string): ModelDecision {
@@ -310,8 +457,10 @@ function ollamaDecisionSchema(request: PlannerRequest): Record<string, unknown> 
 export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
   readonly provider: string;
   readonly model: string;
+  readonly transport = "openai-compatible" as const;
   readonly live = true;
   #callCount = 0;
+  readonly #promptTrace = new PromptTrace(this.transport);
   readonly #baseUrl: string;
   readonly #apiKey: string;
   readonly #timeoutMs: number;
@@ -320,13 +469,28 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
 
   constructor(options: OpenAiCompatiblePlannerOptions) {
     this.#baseUrl = normalizeBaseUrl(options.baseUrl);
-    if (!isLoopbackEndpoint(this.#baseUrl) && options.allowRemoteDataEgress !== true) {
+    const loopback = isLoopbackEndpoint(this.#baseUrl);
+    if (!loopback && new URL(this.#baseUrl).protocol !== "https:") {
+      throw new Error("A non-loopback model endpoint must use HTTPS.");
+    }
+    if (!loopback && options.allowRemoteDataEgress !== true) {
       throw new Error(
         "A non-loopback model endpoint requires allowRemoteDataEgress=true after data-governance approval.",
       );
     }
     this.#apiKey = options.apiKey;
-    this.provider = options.providerName ?? "openai-compatible";
+    const provider = options.providerName ?? "openai-compatible";
+    if (
+      provider === "ollama-local" ||
+      provider === "ollama-remote-approved" ||
+      provider === "handrail-fixture" ||
+      provider === "forbidden"
+    ) {
+      throw new Error(
+        `Provider identity ${provider} is reserved for its native planner transport.`,
+      );
+    }
+    this.provider = provider;
     this.model = options.model;
     this.#includeScreenshot = options.includeScreenshot ?? false;
     this.#timeoutMs = options.timeoutMs ?? 45_000;
@@ -337,10 +501,17 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
     return this.#callCount;
   }
 
+  get promptHash(): string {
+    return this.#promptTrace.hash;
+  }
+
+  promptHashSince(callCount: number): string {
+    return this.#promptTrace.hashSince(callCount);
+  }
+
   async decide(request: PlannerRequest): Promise<PlannerResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
-    this.#callCount += 1;
     try {
       const prompt = [
         "/no_think",
@@ -363,7 +534,7 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
         {
           type: "text",
           text: JSON.stringify({
-            goal: request.goal,
+            goal: modelSafeGoal(request),
             inputs: classifiedAvailability(request.inputs, request.inputSpecs),
             capturedOutputs: classifiedAvailability(request.outputs, request.outputSpecs),
             allowedActions: request.allowedActions,
@@ -380,22 +551,34 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
         });
       }
 
+      const exactSerializedBody = JSON.stringify({
+        model: this.model,
+        temperature: 0,
+        max_tokens: 600,
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "handrail_discovery_decision",
+            strict: true,
+            schema: ollamaDecisionSchema(request),
+          },
+        },
+        messages: [
+          { role: "system", content: prompt },
+          { role: "user", content: userContent },
+        ],
+      });
+      const promptRequestHash = this.#promptTrace.record(exactSerializedBody);
+      this.#callCount += 1;
+
       const response = await this.#fetch(`${this.#baseUrl}/chat/completions`, {
         method: "POST",
+        redirect: "error",
         headers: {
           Authorization: `Bearer ${this.#apiKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          model: this.model,
-          temperature: 0,
-          max_tokens: 600,
-          response_format: { type: "json_object" },
-          messages: [
-            { role: "system", content: prompt },
-            { role: "user", content: userContent },
-          ],
-        }),
+        body: exactSerializedBody,
         signal: controller.signal,
       });
 
@@ -407,15 +590,16 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
       }
       const decision = parseDecision(extractContent(payload));
       if (decision.observationId !== request.observation.id) {
-        throw new Error("The model returned a stale or invented observation ID.");
+        throw new PlannerDecisionError("The model returned a stale or invented observation ID.");
       }
       if (!request.allowedActions.includes(decision.kind)) {
-        throw new Error(`The model returned disallowed action ${decision.kind}.`);
+        throw new PlannerDecisionError(`The model returned disallowed action ${decision.kind}.`);
       }
       const plannerResponse: PlannerResponse = {
         decision,
         provider: this.provider,
         model: this.model,
+        promptRequestHash,
       };
       const usage = {
         ...(payload.usage?.prompt_tokens === undefined
@@ -439,10 +623,12 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
  * to the reviewable action contract.
  */
 export class OllamaPlanner implements DiscoveryPlanner {
-  readonly provider = "ollama-local";
+  readonly provider: "ollama-local" | "ollama-remote-approved";
   readonly model: string;
+  readonly transport = "native-ollama" as const;
   readonly live = true;
   #callCount = 0;
+  readonly #promptTrace = new PromptTrace(this.transport);
   readonly #baseUrl: string;
   readonly #includeScreenshot: boolean;
   readonly #timeoutMs: number;
@@ -450,6 +636,16 @@ export class OllamaPlanner implements DiscoveryPlanner {
 
   constructor(options: OllamaPlannerOptions) {
     this.#baseUrl = normalizeOllamaBaseUrl(options.baseUrl ?? "http://127.0.0.1:11434");
+    const loopback = isLoopbackEndpoint(this.#baseUrl);
+    if (!loopback && new URL(this.#baseUrl).protocol !== "https:") {
+      throw new Error("A non-loopback Ollama endpoint must use HTTPS.");
+    }
+    if (!loopback && options.allowRemoteDataEgress !== true) {
+      throw new Error(
+        "A non-loopback Ollama endpoint requires allowRemoteDataEgress=true before semantic data can leave the host.",
+      );
+    }
+    this.provider = loopback ? "ollama-local" : "ollama-remote-approved";
     this.model = options.model;
     this.#includeScreenshot = options.includeScreenshot ?? false;
     this.#timeoutMs = options.timeoutMs ?? 45_000;
@@ -460,10 +656,17 @@ export class OllamaPlanner implements DiscoveryPlanner {
     return this.#callCount;
   }
 
+  get promptHash(): string {
+    return this.#promptTrace.hash;
+  }
+
+  promptHashSince(callCount: number): string {
+    return this.#promptTrace.hashSince(callCount);
+  }
+
   async decide(request: PlannerRequest): Promise<PlannerResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
-    this.#callCount += 1;
     try {
       const system = [
         "You are the bounded discovery planner for Handrail, a computer-use runtime.",
@@ -479,7 +682,7 @@ export class OllamaPlanner implements DiscoveryPlanner {
       const message: { role: string; content: string; images?: string[] } = {
         role: "user",
         content: JSON.stringify({
-          goal: request.goal,
+          goal: modelSafeGoal(request),
           invocationInputs: classifiedAvailability(request.inputs, request.inputSpecs),
           capturedOutputs: classifiedAvailability(request.outputs, request.outputSpecs),
           allowedActions: request.allowedActions,
@@ -489,17 +692,21 @@ export class OllamaPlanner implements DiscoveryPlanner {
       if (this.#includeScreenshot) {
         message.images = [request.observation.screenshotPng.toString("base64")];
       }
+      const exactSerializedBody = JSON.stringify({
+        model: this.model,
+        stream: false,
+        think: false,
+        format: ollamaDecisionSchema(request),
+        options: { temperature: 0, num_predict: 320 },
+        messages: [{ role: "system", content: system }, message],
+      });
+      const promptRequestHash = this.#promptTrace.record(exactSerializedBody);
+      this.#callCount += 1;
       const response = await this.#fetch(`${this.#baseUrl}/api/chat`, {
         method: "POST",
+        redirect: "error",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: this.model,
-          stream: false,
-          think: false,
-          format: ollamaDecisionSchema(request),
-          options: { temperature: 0, num_predict: 320 },
-          messages: [{ role: "system", content: system }, message],
-        }),
+        body: exactSerializedBody,
         signal: controller.signal,
       });
       const payload = (await response.json()) as OllamaChatResponse;
@@ -508,15 +715,16 @@ export class OllamaPlanner implements DiscoveryPlanner {
       }
       const decision = parseDecision(payload.message?.content ?? "");
       if (decision.observationId !== request.observation.id) {
-        throw new Error("The model returned a stale or invented observation ID.");
+        throw new PlannerDecisionError("The model returned a stale or invented observation ID.");
       }
       if (!request.allowedActions.includes(decision.kind)) {
-        throw new Error(`The model returned disallowed action ${decision.kind}.`);
+        throw new PlannerDecisionError(`The model returned disallowed action ${decision.kind}.`);
       }
       return {
         decision,
         provider: this.provider,
         model: this.model,
+        promptRequestHash,
         usage: {
           ...(payload.prompt_eval_count === undefined
             ? {}
@@ -533,14 +741,29 @@ export class OllamaPlanner implements DiscoveryPlanner {
 export class ScriptedPlanner implements DiscoveryPlanner {
   readonly provider = "handrail-fixture";
   readonly model = "scripted-observation-planner-v1";
+  readonly transport = "scripted" as const;
   readonly live = false;
   #callCount = 0;
+  readonly #promptTrace = new PromptTrace(this.transport);
 
   get callCount(): number {
     return this.#callCount;
   }
 
+  get promptHash(): string {
+    return this.#promptTrace.hash;
+  }
+
+  promptHashSince(callCount: number): string {
+    return this.#promptTrace.hashSince(callCount);
+  }
+
   async decide(request: PlannerRequest): Promise<PlannerResponse> {
+    const exactSerializedBody = JSON.stringify({
+      model: this.model,
+      request,
+    });
+    const promptRequestHash = this.#promptTrace.record(exactSerializedBody);
     this.#callCount += 1;
     const common = {
       decisionId: `decision-${randomUUID()}`,
@@ -601,17 +824,38 @@ export class ScriptedPlanner implements DiscoveryPlanner {
       };
     }
 
-    return { decision, provider: this.provider, model: this.model };
+    return { decision, provider: this.provider, model: this.model, promptRequestHash };
   }
 }
 
 export class ThrowingPlanner implements DiscoveryPlanner {
   readonly provider = "forbidden";
   readonly model = "throw-on-call";
+  readonly transport = "forbidden" as const;
   readonly live = false;
-  readonly callCount = 0;
+  #callCount = 0;
+  readonly #promptTrace = new PromptTrace(this.transport);
 
-  async decide(): Promise<PlannerResponse> {
+  get callCount(): number {
+    return this.#callCount;
+  }
+
+  get promptHash(): string {
+    return this.#promptTrace.hash;
+  }
+
+  promptHashSince(callCount: number): string {
+    return this.#promptTrace.hashSince(callCount);
+  }
+
+  async decide(request: PlannerRequest): Promise<PlannerResponse> {
+    const exactSerializedBody = JSON.stringify({
+      model: this.model,
+      rejection: "Replay attempted to call a model.",
+      request,
+    });
+    this.#promptTrace.record(exactSerializedBody);
+    this.#callCount += 1;
     throw new Error("Replay attempted to call a model.");
   }
 }

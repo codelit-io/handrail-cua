@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createSocket } from "node:dgram";
 import { createServer } from "node:http";
 import { afterEach, describe, it } from "node:test";
 import { createDemoBinding } from "../src/demo/config.js";
@@ -11,9 +12,48 @@ const cleanups: Array<() => Promise<void>> = [];
 async function startNavigationPolicyTarget(): Promise<{
   origin: string;
   entryUrl: string;
+  serviceWorkerScriptRequestCount: () => number;
+  webrtcDatagramCount: () => number;
+  websocketUpgradeCount: () => number;
+  outsideBindingRequestCount: () => number;
   close: () => Promise<void>;
 }> {
-  const server = createServer((_request, response) => {
+  let websocketUpgradeCount = 0;
+  let serviceWorkerScriptRequestCount = 0;
+  let webrtcDatagramCount = 0;
+  let outsideBindingRequestCount = 0;
+  const udpServer = createSocket("udp4");
+  udpServer.on("message", () => {
+    webrtcDatagramCount += 1;
+  });
+  const udpPort = await new Promise<number>((resolve, reject) => {
+    udpServer.once("error", reject);
+    udpServer.bind(0, "127.0.0.1", () => {
+      udpServer.off("error", reject);
+      const address = udpServer.address();
+      resolve(address.port);
+    });
+  });
+  const server = createServer((request, response) => {
+    if (request.url?.startsWith("/outside-binding")) outsideBindingRequestCount += 1;
+    if (request.url === "/legacy/sw.js") {
+      serviceWorkerScriptRequestCount += 1;
+      const worker = Buffer.from('self.addEventListener("fetch", () => undefined);', "utf8");
+      response.writeHead(200, {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Content-Length": String(worker.byteLength),
+      });
+      response.end(worker);
+      return;
+    }
+    const observationDriftControls = request.url?.includes("observe-drift=1")
+      ? `${Array.from(
+          { length: 120 },
+          (_, index) => `<button type="button">Drift filler ${index + 1}</button>`,
+        ).join(
+          "",
+        )}<button id="observation-drift-trigger" type="button">Observation drift trigger</button>`
+      : "";
     const body = Buffer.from(
       `<!doctype html>
       <html lang="en">
@@ -23,12 +63,102 @@ async function startNavigationPolicyTarget(): Promise<{
           <a href="about:blank">About blank escape</a>
           <a href="data:text/html,%3Ctitle%3EData%20escape%3C%2Ftitle%3E">Data URL escape</a>
           <a href="https://example.com/diagnostics">Off-origin escape</a>
+          <a href="/outside-binding">Same-origin route escape</a>
+          <a href="#allowed-section" target="_blank">Declarative popup escape</a>
           <button id="delayed-route" type="button">Delayed route change</button>
+          <button id="window-open-escape" type="button">Script popup escape</button>
+          <output id="window-open-status">Script popup not attempted</output>
+          <form id="async-popup-form" method="get" action="/outside-binding" target="_blank">
+            <button id="async-popup-escape" type="button">Async popup escape</button>
+          </form>
+          <button id="websocket-escape" type="button">Open WebSocket</button>
+          <output id="websocket-status">WebSocket not attempted</output>
+          <button id="service-worker" type="button">Register service worker</button>
+          <output id="service-worker-status">Service worker not attempted</output>
+          <button id="webrtc-escape" type="button">Open WebRTC</button>
+          <output id="webrtc-status">WebRTC not attempted</output>
+          <button id="webtransport-escape" type="button">Open WebTransport</button>
+          <output id="webtransport-status">WebTransport not attempted</output>
           <section id="allowed-section">Allowed anchor destination</section>
+          ${observationDriftControls}
           <script>
             document.querySelector("#delayed-route").addEventListener("click", () => {
               window.setTimeout(() => history.pushState({}, "", "/outside-binding"), 100);
             });
+            document.querySelector("#window-open-escape").addEventListener("click", () => {
+              const status = document.querySelector("#window-open-status");
+              try {
+                const popup = window.open("/outside-binding", "_blank");
+                status.textContent = popup ? "Script popup opened" : "Script popup blocked";
+              } catch {
+                status.textContent = "Script popup blocked";
+              }
+            });
+            document.querySelector("#async-popup-escape").addEventListener("click", () => {
+              window.setTimeout(() => document.querySelector("#async-popup-form").submit(), 80);
+            });
+            document.querySelector("#websocket-escape").addEventListener("click", () => {
+              const status = document.querySelector("#websocket-status");
+              let opened = false;
+              const socket = new WebSocket(
+                (location.protocol === "https:" ? "wss://" : "ws://") +
+                  location.host +
+                  "/socket-escape",
+              );
+              socket.addEventListener("open", () => {
+                opened = true;
+                status.textContent = "WebSocket connected";
+              });
+              socket.addEventListener("error", () => {
+                status.textContent = "WebSocket blocked";
+              });
+              socket.addEventListener("close", () => {
+                if (!opened) status.textContent = "WebSocket blocked";
+              });
+            });
+            document.querySelector("#service-worker").addEventListener("click", async () => {
+              const status = document.querySelector("#service-worker-status");
+              try {
+                await navigator.serviceWorker.register("/legacy/sw.js");
+                status.textContent = "Service worker registered";
+              } catch {
+                status.textContent = "Service worker blocked";
+              }
+            });
+            document.querySelector("#webrtc-escape").addEventListener("click", async () => {
+              const status = document.querySelector("#webrtc-status");
+              try {
+                const peer = new RTCPeerConnection({
+                  iceServers: [{ urls: "stun:127.0.0.1:${udpPort}" }],
+                });
+                peer.createDataChannel("policy-bypass");
+                await peer.setLocalDescription(await peer.createOffer());
+                status.textContent = "WebRTC opened";
+              } catch {
+                status.textContent = "WebRTC blocked";
+              }
+            });
+            document.querySelector("#webtransport-escape").addEventListener("click", () => {
+              const status = document.querySelector("#webtransport-status");
+              try {
+                new WebTransport("https://127.0.0.1:${udpPort}/transport-escape");
+                status.textContent = "WebTransport opened";
+              } catch {
+                status.textContent = "WebTransport blocked";
+              }
+            });
+            const driftTrigger = document.querySelector("#observation-drift-trigger");
+            if (driftTrigger) {
+              let drifted = false;
+              const getAttribute = driftTrigger.getAttribute.bind(driftTrigger);
+              driftTrigger.getAttribute = (name) => {
+                if (!drifted) {
+                  drifted = true;
+                  history.pushState({}, "", "/outside-binding");
+                }
+                return getAttribute(name);
+              };
+            }
           </script>
         </body>
       </html>`,
@@ -39,6 +169,10 @@ async function startNavigationPolicyTarget(): Promise<{
       "Content-Length": String(body.byteLength),
     });
     response.end(body);
+  });
+  server.on("upgrade", (_request, socket) => {
+    websocketUpgradeCount += 1;
+    socket.destroy();
   });
   const port = await new Promise<number>((resolve, reject) => {
     server.once("error", reject);
@@ -56,13 +190,21 @@ async function startNavigationPolicyTarget(): Promise<{
   return {
     origin,
     entryUrl: `${origin}/legacy`,
-    close: () =>
-      new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error) reject(error);
-          else resolve();
-        });
-      }),
+    serviceWorkerScriptRequestCount: () => serviceWorkerScriptRequestCount,
+    webrtcDatagramCount: () => webrtcDatagramCount,
+    websocketUpgradeCount: () => websocketUpgradeCount,
+    outsideBindingRequestCount: () => outsideBindingRequestCount,
+    close: async () => {
+      await Promise.all([
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        }),
+        new Promise<void>((resolve) => udpServer.close(() => resolve())),
+      ]);
+    },
   };
 }
 
@@ -71,6 +213,184 @@ afterEach(async () => {
 });
 
 describe("browser surface adapter", () => {
+  it("prevents popup creation and closes a session after an asynchronous new-page attempt", async () => {
+    const target = await startNavigationPolicyTarget();
+    const control = new ControlCoordinator();
+    const surface = await BrowserSurface.launch({ control, headless: true });
+    cleanups.push(async () => surface.close(), target.close);
+
+    const session = await surface.createSession(createDemoBinding(target.origin));
+    const grant = control.createAutomationLease(session.id, "popup-policy-test");
+    await surface.navigate(session.id, target.entryUrl, grant);
+
+    let observation = await surface.observe(session.id);
+    const declarativePopup = observation.elements.find(
+      (candidate) => candidate.name === "Declarative popup escape",
+    );
+    assert.ok(declarativePopup);
+    await assert.rejects(
+      surface.dispatch(
+        session.id,
+        {
+          decisionId: "declarative-popup-escape",
+          observationId: observation.id,
+          kind: "activate",
+          elementRef: declarativePopup.ref,
+          rationale: "Exercise a target-blank activation inside an otherwise allowed route.",
+        },
+        { observationId: observation.id, inputs: {}, grant, expectedUrl: observation.url },
+      ),
+      /single-page/u,
+    );
+
+    observation = await surface.observe(session.id);
+    const scriptedPopup = observation.elements.find(
+      (candidate) => candidate.name === "Script popup escape",
+    );
+    assert.ok(scriptedPopup);
+    await surface.dispatch(
+      session.id,
+      {
+        decisionId: "script-popup-escape",
+        observationId: observation.id,
+        kind: "activate",
+        elementRef: scriptedPopup.ref,
+        rationale: "Exercise a direct window.open attempt.",
+      },
+      { observationId: observation.id, inputs: {}, grant, expectedUrl: observation.url },
+    );
+    assert.match((await surface.observe(session.id)).visibleText, /Script popup blocked/u);
+
+    observation = await surface.observe(session.id);
+    const asyncPopup = observation.elements.find(
+      (candidate) => candidate.name === "Async popup escape",
+    );
+    assert.ok(asyncPopup);
+    const x = (asyncPopup.bounds.x + asyncPopup.bounds.width / 2) * observation.viewport.width;
+    const y = (asyncPopup.bounds.y + asyncPopup.bounds.height / 2) * observation.viewport.height;
+    await surface.clickAt(session.id, x, y, grant, observation.url);
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    await assert.rejects(surface.observe(session.id), /popup or additional page/u);
+    await assert.rejects(surface.observe(session.id), /Unknown browser surface session/u);
+    assert.equal(target.outsideBindingRequestCount(), 0);
+  });
+
+  it("blocks browser transports outside the declared HTTP surface boundary", async () => {
+    const target = await startNavigationPolicyTarget();
+    const control = new ControlCoordinator();
+    const surface = await BrowserSurface.launch({ control, headless: true });
+    cleanups.push(async () => surface.close(), target.close);
+
+    const session = await surface.createSession(createDemoBinding(target.origin));
+    const grant = control.createAutomationLease(session.id, "browser-transport-policy-test");
+    await surface.navigate(session.id, target.entryUrl, grant);
+
+    const activate = async (name: string): Promise<void> => {
+      const observation = await surface.observe(session.id);
+      const element = observation.elements.find((candidate) => candidate.name === name);
+      assert.ok(element);
+      await surface.dispatch(
+        session.id,
+        {
+          decisionId: `transport-${name.toLowerCase().replaceAll(/[^a-z]+/gu, "-")}`,
+          observationId: observation.id,
+          kind: "activate",
+          elementRef: element.ref,
+          rationale: "Exercise a browser transport the HTTP surface does not authorize.",
+        },
+        { observationId: observation.id, inputs: {}, grant, expectedUrl: observation.url },
+      );
+    };
+
+    await activate("Open WebSocket");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match((await surface.observe(session.id)).visibleText, /WebSocket blocked/u);
+    assert.equal(target.websocketUpgradeCount(), 0);
+
+    await activate("Register service worker");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(target.serviceWorkerScriptRequestCount(), 0);
+    assert.equal(target.websocketUpgradeCount(), 0);
+
+    await activate("Open WebRTC");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.match((await surface.observe(session.id)).visibleText, /WebRTC blocked/u);
+    assert.equal(target.webrtcDatagramCount(), 0);
+
+    await activate("Open WebTransport");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match((await surface.observe(session.id)).visibleText, /WebTransport blocked/u);
+    assert.equal(target.webrtcDatagramCount(), 0);
+  });
+
+  it("rejects a same-document route change during observation", async () => {
+    const target = await startNavigationPolicyTarget();
+    const control = new ControlCoordinator();
+    const surface = await BrowserSurface.launch({ control, headless: true });
+    cleanups.push(async () => surface.close(), target.close);
+
+    const session = await surface.createSession(createDemoBinding(target.origin));
+    const grant = control.createAutomationLease(session.id, "observation-route-drift-test");
+    await surface.navigate(session.id, `${target.entryUrl}?observe-drift=1`, grant);
+    await assert.rejects(surface.observe(session.id), /Route \/outside-binding/u);
+    await assert.rejects(surface.observe(session.id), /Unknown browser surface session/u);
+  });
+
+  it("enforces every effective origin and route layer at the browser boundary", async () => {
+    const target = await startNavigationPolicyTarget();
+    const control = new ControlCoordinator();
+    const surface = await BrowserSurface.launch({ control, headless: true });
+    cleanups.push(async () => surface.close(), target.close);
+
+    const base = createDemoBinding(target.origin);
+    const widenedBinding = {
+      ...base,
+      policy: {
+        ...base.policy,
+        allowedRoutes: ["/legacy", "/outside-binding"],
+      },
+    };
+    const session = await surface.createSession(widenedBinding, [
+      {
+        name: "platform",
+        allowedOrigins: [target.origin],
+        allowedRoutes: ["/legacy"],
+      },
+    ]);
+    const grant = control.createAutomationLease(session.id, "effective-surface-policy-test");
+    await surface.navigate(session.id, target.entryUrl, grant);
+    const observation = await surface.observe(session.id);
+    const routeEscape = observation.elements.find(
+      (candidate) => candidate.name === "Same-origin route escape",
+    );
+    assert.ok(routeEscape);
+
+    await assert.rejects(
+      surface.dispatch(
+        session.id,
+        {
+          decisionId: "effective-policy-route-escape",
+          observationId: observation.id,
+          kind: "activate",
+          elementRef: routeEscape.ref,
+          rationale: "The broader app binding must not widen the effective platform policy.",
+        },
+        {
+          observationId: observation.id,
+          inputs: {},
+          grant,
+          expectedUrl: observation.url,
+        },
+      ),
+      /outside effective policy layer platform/u,
+    );
+    await assert.rejects(
+      surface.navigate(session.id, `${target.origin}/outside-binding`, grant),
+      /outside effective policy layer platform/u,
+    );
+    assert.equal((await surface.observe(session.id)).url, observation.url);
+  });
+
   it("observes a hostile iframe, compiles semantic targets, and extracts a typed balance", async () => {
     const target: LegacyTargetHandle = await startLegacyTarget();
     const control = new ControlCoordinator();
@@ -182,6 +502,69 @@ describe("browser surface adapter", () => {
     const session = await surface.createSession(createDemoBinding(target.origin));
     const grant = control.createAutomationLease(session.id, "navigation-policy-test");
     await surface.navigate(session.id, target.entryUrl, grant);
+    const authorizedObservation = await surface.observe(session.id);
+    const authorizedLink = authorizedObservation.elements.find(
+      (candidate) => candidate.name === "Same-page anchor",
+    );
+    assert.ok(authorizedLink);
+    const authorizedTarget = surface.compileTarget(
+      authorizedObservation.id,
+      authorizedLink.ref,
+      "Same-page anchor",
+    );
+    const staleAuthorizedUrl = `${target.origin}/wrong-but-allowed`;
+    await assert.rejects(
+      surface.clickAt(session.id, 1, 1, grant, staleAuthorizedUrl),
+      /changed after policy authorization/u,
+    );
+    await assert.rejects(
+      surface.dispatch(
+        session.id,
+        {
+          decisionId: "dispatch-with-stale-policy-url",
+          observationId: authorizedObservation.id,
+          kind: "activate",
+          elementRef: authorizedLink.ref,
+          rationale: "A dispatch must stay bound to the URL policy authorized.",
+        },
+        {
+          observationId: authorizedObservation.id,
+          inputs: {},
+          grant,
+          expectedUrl: staleAuthorizedUrl,
+        },
+      ),
+      /changed after policy authorization/u,
+    );
+    await assert.rejects(
+      surface.evaluate(
+        session.id,
+        { kind: "target_visible", target: "same-page", expected: true },
+        {
+          inputs: {},
+          outputs: {},
+          targets: { "same-page": authorizedTarget },
+          grant,
+          expectedUrl: staleAuthorizedUrl,
+        },
+      ),
+      /changed after policy authorization/u,
+    );
+    await assert.rejects(
+      surface.extract(
+        session.id,
+        authorizedTarget,
+        { kind: "target_text", target: "same-page", transforms: ["trim"] },
+        undefined,
+        grant,
+        staleAuthorizedUrl,
+      ),
+      /changed after policy authorization/u,
+    );
+    await assert.rejects(
+      surface.captureEvidence(session.id, "stale-policy-url", undefined, staleAuthorizedUrl, grant),
+      /changed after policy authorization/u,
+    );
 
     const activate = async (
       name: string,

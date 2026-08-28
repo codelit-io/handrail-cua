@@ -11,6 +11,7 @@ import type {
   CommandKind,
   EffectClass,
 } from "../domain/schema.js";
+import type { SurfaceAccessLayer } from "../surface/types.js";
 
 export type PolicyActor = "discovery" | "replay" | "operator" | "system";
 export type RuntimeCommand =
@@ -302,6 +303,21 @@ function invalidLayer(layer: PolicyLayer): string | undefined {
   }
 
   return undefined;
+}
+
+/** Project each origin/route layer into the browser's network enforcement boundary. */
+export function surfaceAccessPolicy(
+  policy: PolicyStack | readonly PolicyLayer[],
+): readonly SurfaceAccessLayer[] {
+  return layersOf(policy).map((layer) => {
+    const invalid = invalidLayer(layer);
+    if (invalid) throw new TypeError(`Invalid ${layer.name || "unnamed"} policy: ${invalid}.`);
+    return {
+      name: layer.name,
+      ...(layer.allowedOrigins ? { allowedOrigins: [...layer.allowedOrigins] } : {}),
+      ...(layer.allowedRoutes ? { allowedRoutes: [...layer.allowedRoutes] } : {}),
+    };
+  });
 }
 
 function approvalMatches(

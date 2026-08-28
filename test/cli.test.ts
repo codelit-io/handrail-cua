@@ -1,19 +1,25 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
+  assertStableModelEvidence,
   CliEvidenceWriter,
   type CliIo,
   discoverySummary,
   isPlaywrightAlreadyClosedError,
   replaySummary,
+  resolvedModelEvidence,
+  resolveScreenshotModelInput,
+  resolveTargetSource,
   runCli,
+  waitForExternalArtifactApproval,
 } from "../src/cli.js";
 import { type CapabilityArtifact, type RunResult, RunResultSchema } from "../src/domain/schema.js";
 import type { DiscoveryResult } from "../src/runtime/discovery.js";
-import { PII_REDACTION, SECRET_REDACTION } from "../src/runtime/redaction.js";
+import { INTERNAL_REDACTION, PII_REDACTION, SECRET_REDACTION } from "../src/runtime/redaction.js";
 import { replayArtifact } from "./fixtures/replay/scenario.js";
 
 const temporaryDirectories: string[] = [];
@@ -75,6 +81,279 @@ describe("public CLI", () => {
     assert.match(help, /--handoff/);
     assert.match(help, /--goal TEXT/);
     assert.match(help, /--target URL/);
+    assert.match(help, /--artifact-approval PATH/);
+    assert.match(help, /--approval-timeout-ms MS/);
+    assert.match(help, /npm run approve/u);
+    assert.match(help, /Required digest-bound approval/u);
+    assert.match(help, /--source-revision COMMIT/);
+  });
+
+  it("derives evidence provenance from effective model and target configuration", () => {
+    assert.equal(resolveScreenshotModelInput("live", false, "true"), true);
+    assert.equal(resolveScreenshotModelInput("live", false, "false"), false);
+    assert.equal(resolveScreenshotModelInput("live", true, "false"), true);
+    assert.equal(resolveScreenshotModelInput("scripted", true, "true"), false);
+    assert.equal(resolveTargetSource(undefined), "bundled-fixture");
+    assert.equal(resolveTargetSource("http://127.0.0.1:4312/legacy"), "external");
+  });
+
+  it("requires an exact native Ollama model digest for live evidence", async () => {
+    let includeDigest = true;
+    const modelDigest = "a".repeat(64);
+    const server = createServer((_request, response) => {
+      const body = Buffer.from(
+        JSON.stringify({
+          models: [
+            {
+              name: "qwen3:4b",
+              model: "qwen3:4b",
+              ...(includeDigest ? { digest: modelDigest } : {}),
+            },
+          ],
+        }),
+        "utf8",
+      );
+      response.writeHead(200, {
+        "Content-Type": "application/json",
+        "Content-Length": String(body.byteLength),
+      });
+      response.end(body);
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("Ollama fixture did not expose a TCP address."));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+    const provenance = {
+      ...replayArtifact().provenance,
+      provider: "ollama-local",
+      modelId: "qwen3:4b",
+      liveModel: true,
+    };
+    const env = { HANDRAIL_OLLAMA_BASE_URL: `http://127.0.0.1:${port}` };
+    try {
+      assert.equal(
+        (await resolvedModelEvidence(provenance, env, "native-ollama", true)).digest,
+        modelDigest,
+      );
+      includeDigest = false;
+      await assert.rejects(
+        resolvedModelEvidence(provenance, env, "native-ollama", true),
+        /requires the selected model's 64-character SHA-256 digest/u,
+      );
+      await assert.rejects(
+        resolvedModelEvidence(provenance, env, "openai-compatible", true),
+        /requires the selected model's 64-character SHA-256 digest/u,
+      );
+      assert.equal(
+        (await resolvedModelEvidence(provenance, env, "native-ollama")).digest,
+        undefined,
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    }
+  });
+
+  it("fails closed if the model identity or digest changes during discovery", () => {
+    const before = {
+      provider: "ollama-local",
+      modelId: "qwen3:4b",
+      liveModel: true,
+      digest: "a".repeat(64),
+    };
+    assert.deepEqual(assertStableModelEvidence(before, { ...before }), before);
+    assert.throws(
+      () => assertStableModelEvidence(before, { ...before, digest: "b".repeat(64) }),
+      /changed while discovery was running/u,
+    );
+  });
+
+  it("continues only after an independently written exact artifact approval", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "handrail-cli-external-approval-"));
+    temporaryDirectories.push(root);
+    const approvalPath = path.join(root, "artifact-approval.json");
+    const artifact = replayArtifact();
+    const approval = {
+      artifactId: artifact.id,
+      revision: artifact.revision,
+      digest: artifact.digest,
+      approvedBy: "reviewer-02",
+      approvedAt: "2026-08-27T18:30:00.000Z",
+    } as const;
+
+    const waiting = waitForExternalArtifactApproval(
+      artifact,
+      approvalPath,
+      1_000,
+      () => new Date("2026-08-27T18:31:00.000Z"),
+    );
+    await writeFile(approvalPath, `${JSON.stringify(approval, null, 2)}\n`, "utf8");
+
+    assert.deepEqual(await waiting, approval);
+  });
+
+  it("requires a new external approval path before a live demo starts a browser", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "handrail-cli-live-approval-boundary-"));
+    temporaryDirectories.push(root);
+    const output = path.join(root, "bundle");
+    const capture = captureIo();
+    const io: CliIo = { ...capture.io, cwd: root };
+
+    await assert.rejects(
+      runCli(["demo", "--planner", "live", "--output", output], io),
+      /requires --artifact-approval PATH/u,
+    );
+    await assert.rejects(access(output));
+
+    const preexisting = path.join(root, "approval", "artifact-approval.json");
+    await mkdir(path.dirname(preexisting), { recursive: true });
+    await writeFile(preexisting, "{}\n", "utf8");
+    await assert.rejects(
+      runCli(
+        ["demo", "--planner", "live", "--artifact-approval", preexisting, "--output", output],
+        io,
+      ),
+      /must be issued after this discovery run/u,
+    );
+    await assert.rejects(access(output));
+
+    await assert.rejects(
+      runCli(
+        [
+          "demo",
+          "--planner",
+          "live",
+          "--artifact-approval",
+          path.join(output, "approval.json"),
+          "--output",
+          output,
+        ],
+        io,
+      ),
+      /outside the evidence bundle directory/u,
+    );
+    await assert.rejects(access(output));
+  });
+
+  it("rejects a malformed artifact approval before starting browser replay", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "handrail-cli-approval-"));
+    temporaryDirectories.push(root);
+    const artifactPath = path.join(root, "artifact.json");
+    const approvalPath = path.join(root, "approval.json");
+    await writeFile(artifactPath, `${JSON.stringify(replayArtifact(), null, 2)}\n`, "utf8");
+    await writeFile(approvalPath, `${JSON.stringify({ approvedBy: "reviewer-only" })}\n`, "utf8");
+    const capture = captureIo();
+    const io: CliIo = { ...capture.io, cwd: root };
+
+    await assert.rejects(
+      runCli(
+        [
+          "replay",
+          "--artifact",
+          artifactPath,
+          "--artifact-approval",
+          approvalPath,
+          "--output",
+          path.join(root, "should-not-exist"),
+        ],
+        io,
+      ),
+      /artifactId|revision|digest/u,
+    );
+    await assert.rejects(access(path.join(root, "should-not-exist")));
+    assert.deepEqual(capture.stdout, []);
+  });
+
+  it("requires artifact approval before creating replay output or a browser session", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "handrail-cli-missing-approval-"));
+    temporaryDirectories.push(root);
+    const artifactPath = path.join(root, "artifact.json");
+    const output = path.join(root, "should-not-exist");
+    await writeFile(artifactPath, `${JSON.stringify(replayArtifact(), null, 2)}\n`, "utf8");
+    const capture = captureIo();
+    const io: CliIo = { ...capture.io, cwd: root };
+
+    await assert.rejects(
+      runCli(["replay", "--artifact", artifactPath, "--output", output], io),
+      /Replay requires --artifact-approval/u,
+    );
+    await assert.rejects(access(output));
+    assert.deepEqual(capture.stdout, []);
+  });
+
+  it("writes an immutable digest-bound approval only after explicit review confirmation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "handrail-cli-approve-"));
+    temporaryDirectories.push(root);
+    const artifact = replayArtifact();
+    const artifactPath = path.join(root, "artifact.json");
+    const output = path.join(root, "approval-output");
+    await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+    const capture = captureIo();
+    const io: CliIo = { ...capture.io, cwd: root };
+
+    await assert.rejects(
+      runCli(
+        ["approve", "--artifact", artifactPath, "--reviewer", "reviewer-01", "--output", output],
+        io,
+      ),
+      /requires --confirm-reviewed/u,
+    );
+    await assert.rejects(access(output));
+
+    assert.equal(
+      await runCli(
+        [
+          "approve",
+          "--artifact",
+          artifactPath,
+          "--reviewer",
+          "reviewer-01",
+          "--confirm-reviewed",
+          "--output",
+          output,
+        ],
+        io,
+      ),
+      0,
+    );
+    const approval = JSON.parse(
+      await readFile(path.join(output, "artifact-approval.json"), "utf8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(approval, {
+      artifactId: artifact.id,
+      revision: artifact.revision,
+      digest: artifact.digest,
+      approvedBy: "reviewer-01",
+      approvedAt: "2026-08-27T12:00:00.000Z",
+    });
+    await assert.rejects(
+      runCli(
+        [
+          "approve",
+          "--artifact",
+          artifactPath,
+          "--reviewer",
+          "reviewer-01",
+          "--confirm-reviewed",
+          "--output",
+          output,
+        ],
+        io,
+      ),
+      /already exists/u,
+    );
   });
 
   it("recognizes only Playwright's already-closed shutdown error", () => {
@@ -136,6 +415,11 @@ describe("public CLI", () => {
             classification: "secret",
             validator: { kind: "string" },
           },
+          internalBalance: {
+            description: "Opaque internal value",
+            classification: "internal",
+            validator: { kind: "number" },
+          },
           publicStatus: {
             description: "Public completion status",
             classification: "public",
@@ -160,6 +444,7 @@ describe("public CLI", () => {
       outputs: {
         privateProfile: unusualPii,
         brokerMaterial: classifiedOpaque,
+        internalBalance: 1_284.37,
         publicStatus: "complete",
       },
       checkpointEvidence: [],
@@ -227,6 +512,7 @@ describe("public CLI", () => {
     assert.deepEqual(replay.result.outputs, {
       privateProfile: PII_REDACTION,
       brokerMaterial: SECRET_REDACTION,
+      internalBalance: INTERNAL_REDACTION,
       publicStatus: "complete",
     });
     assert.doesNotThrow(() => RunResultSchema.parse(replay.result));

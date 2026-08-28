@@ -45,7 +45,11 @@ function actionReceipt(command: ActionReceipt["command"], summary: string): Acti
   };
 }
 
-function fakeSurface(session: SurfaceSession): {
+function fakeSurface(
+  session: SurfaceSession,
+  currentUrl = "http://127.0.0.1:4312/legacy",
+  beforeObserve?: (observationNumber: number) => Promise<void>,
+): {
   readonly surface: SurfaceAdapter;
   readonly calls: FakeSurfaceCalls;
 } {
@@ -72,13 +76,16 @@ function fakeSurface(session: SurfaceSession): {
     },
     async observe(sessionId: string): Promise<SurfaceObservation> {
       calls.observe += 1;
+      const observationNumber = calls.observe;
       calls.sessions.push(sessionId);
+      await beforeObserve?.(observationNumber);
       return {
-        id: `observation-${calls.observe}`,
+        id: `observation-${observationNumber}`,
         sessionId,
+        url: currentUrl,
         route: "/legacy",
         title: "Synthetic legacy member services",
-        capturedAt: `2026-08-27T18:00:0${calls.observe}.000Z`,
+        capturedAt: `2026-08-27T18:00:0${observationNumber}.000Z`,
         screenshotPng: Buffer.from(PNG_1X1),
         viewport: { ...session.viewport },
         visibleText: "Synthetic banking surface",
@@ -386,12 +393,12 @@ describe("operator console", () => {
     const click = await post(intervention.url, "click", {
       claimId: claim.claimId,
       epoch: claim.epoch,
-      x: 320,
-      y: 180,
+      x: 320.49,
+      y: 180.51,
     });
     assert.equal(click.status, 200);
     assert.deepEqual(fake.calls.clicks, [
-      { sessionId: session.id, x: 320, y: 180, epoch: claim.epoch },
+      { sessionId: session.id, x: 320, y: 181, epoch: claim.epoch },
     ]);
 
     // Assemble the provider-shaped canary at runtime so the repository itself
@@ -427,7 +434,7 @@ describe("operator console", () => {
       authorizationContexts.map(({ action, effect }) => ({ action, effect })),
       [
         { action: "activate_coordinate", effect: "commit" },
-        { action: "type", effect: "reversible_write" },
+        { action: "type", effect: "commit" },
         { action: "press_key", effect: "commit" },
         { action: "capture_evidence", effect: "read" },
       ],
@@ -436,6 +443,7 @@ describe("operator console", () => {
       assert.equal(context.runId, intervention.runId);
       assert.equal(context.sessionId, session.id);
       assert.equal(context.session.id, session.id);
+      assert.equal(context.currentUrl, "http://127.0.0.1:4312/legacy");
       assert.equal(context.ownerEpoch, claim.epoch);
       assert.equal(context.operatorId, "operator-demo");
       assert.ok(Number.isFinite(Date.parse(context.operatorLeaseExpiresAt)));
@@ -454,10 +462,15 @@ describe("operator console", () => {
       intervention.audit().map((event) => event.action),
       [
         "automation_paused",
+        "control_claim_authorized",
         "control_claimed",
+        "operator_action_authorized",
         "operator_clicked",
+        "operator_action_authorized",
         "operator_typed",
+        "operator_action_authorized",
         "operator_pressed_key",
+        "operator_action_authorized",
         "evidence_captured",
       ],
     );
@@ -565,6 +578,8 @@ describe("operator console", () => {
       { route: "click", body: { x: 320, y: 180 } },
       { route: "type", body: { value: "must-not-reach-the-surface" } },
       { route: "key", body: { key: "Enter" } },
+      { route: "key", body: { key: "ArrowDown" } },
+      { route: "key", body: { key: "Tab" } },
       { route: "capture", body: {} },
     ] as const;
     for (const action of actions) {
@@ -584,17 +599,71 @@ describe("operator console", () => {
       authorizationContexts.map(({ action, effect }) => ({ action, effect })),
       [
         { action: "activate_coordinate", effect: "commit" },
-        { action: "type", effect: "reversible_write" },
+        { action: "type", effect: "commit" },
+        { action: "press_key", effect: "commit" },
+        { action: "press_key", effect: "commit" },
         { action: "press_key", effect: "commit" },
         { action: "capture_evidence", effect: "read" },
       ],
     );
-    assert.deepEqual(fake.calls.sessions, []);
+    assert.equal(fake.calls.observe, actions.length);
+    assert.deepEqual(new Set(fake.calls.sessions), new Set([session.id]));
     assert.deepEqual(fake.calls.clicks, []);
     assert.deepEqual(fake.calls.typedCharacterCounts, []);
     assert.deepEqual(fake.calls.keys, []);
     assert.equal(fake.calls.captures, 0);
     assert.equal(control.snapshot(session.id).owner?.id, "operator-denied");
+  });
+
+  it("authorizes against a fresh current URL and denies route drift before dispatch", async () => {
+    const session: SurfaceSession = {
+      id: "surface-route-drift",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session, "https://untrusted.example/phishing");
+    const observedUrls: string[] = [];
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      authorizeOperatorAction: (context) => {
+        observedUrls.push(context.currentUrl);
+        return new URL(context.currentUrl).origin === "http://127.0.0.1:4312"
+          ? { allowed: true, authorization: "loopback_demo" }
+          : { allowed: false, code: "ROUTE_DENIED", summary: "Current URL is outside policy." };
+      },
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-route-drift-001",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "The retained surface may have drifted",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+    });
+    const waiting = intervention.state();
+    const claimResponse = await post(intervention.url, "claim", {
+      operatorId: "operator-route-review",
+      expectedEpoch: waiting.control.epoch,
+    });
+    const claim = await responseJson<{ claimId: string; epoch: number }>(claimResponse);
+    const click = await post(intervention.url, "click", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+      x: 320,
+      y: 180,
+    });
+
+    assert.equal(click.status, 403, await click.clone().text());
+    assert.deepEqual(observedUrls, ["https://untrusted.example/phishing"]);
+    assert.equal(fake.calls.observe, 1);
+    assert.deepEqual(fake.calls.clicks, []);
   });
 
   it("fails closed when no operator action authorizer is configured", async () => {
@@ -639,8 +708,623 @@ describe("operator console", () => {
       (await responseJson<{ error: { code: string } }>(response)).error.code,
       "POLICY_DENIED",
     );
-    assert.deepEqual(fake.calls.sessions, []);
+    assert.equal(fake.calls.observe, 1);
+    assert.deepEqual(new Set(fake.calls.sessions), new Set([session.id]));
     assert.deepEqual(fake.calls.clicks, []);
+  });
+
+  it("retains operator ownership when the resume checkpoint does not pass", async () => {
+    const session: SurfaceSession = {
+      id: "surface-checkpoint-blocked",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session);
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      authorizeOperatorAction: allowLoopbackDemoOperatorAction,
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-checkpoint-blocked-001",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "The recovery checkpoint is intentionally false",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({
+        passed: false,
+        observed: "The session-expiry dialog remains visible.",
+      }),
+    });
+    const waiting = intervention.state();
+    const claimResponse = await post(intervention.url, "claim", {
+      operatorId: "operator-checkpoint",
+      expectedEpoch: waiting.control.epoch,
+    });
+    const claim = await responseJson<{ claimId: string; epoch: number }>(claimResponse);
+    const resume = await post(intervention.url, "resume", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+    });
+
+    assert.equal(resume.status, 409, await resume.clone().text());
+    assert.equal(
+      (await responseJson<{ error: { code: string } }>(resume)).error.code,
+      "SESSION_CONFLICT",
+    );
+    assert.equal(control.snapshot(session.id).phase, "OPERATOR_ACTIVE");
+    assert.equal(control.snapshot(session.id).owner?.id, "operator-checkpoint");
+    assert.equal(intervention.state().canResume, true);
+    assert.equal(intervention.audit().at(-1)?.action, "resume_checkpoint_failed");
+
+    const capture = await post(intervention.url, "capture", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+    });
+    assert.equal(capture.status, 200, await capture.clone().text());
+    assert.equal(fake.calls.captures, 1);
+  });
+
+  it("rejects capture requests beyond the durable per-intervention limit", async () => {
+    const session: SurfaceSession = {
+      id: "surface-capture-limit",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session);
+    let durableCaptures = 0;
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      authorizeOperatorAction: allowLoopbackDemoOperatorAction,
+      captureSink: async (capture) => {
+        durableCaptures += 1;
+        return { evidenceId: capture.id, durable: true };
+      },
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-capture-limit",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "Capture retention limit is under test",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+    });
+    const claimResponse = await post(intervention.url, "claim", {
+      operatorId: "operator-capture-limit",
+      expectedEpoch: intervention.state().control.epoch,
+    });
+    const claim = await responseJson<{ claimId: string; epoch: number }>(claimResponse);
+
+    for (let index = 0; index < 8; index += 1) {
+      const response = await post(intervention.url, "capture", {
+        claimId: claim.claimId,
+        epoch: claim.epoch,
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+    }
+    const observationsBeforeLimit = fake.calls.observe;
+    const ninth = await post(intervention.url, "capture", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+    });
+
+    assert.equal(ninth.status, 409, await ninth.clone().text());
+    assert.equal(fake.calls.captures, 8);
+    assert.equal(durableCaptures, 8);
+    assert.equal(intervention.captures().length, 8);
+    assert.equal(fake.calls.observe, observationsBeforeLimit);
+  });
+
+  it("accepts only the exact pre-quiesced discovery epoch", async () => {
+    const session: SurfaceSession = {
+      id: "surface-pre-quiesced",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "discovery");
+    control.requestPause(automation, "Discovery requested operator help.");
+    const waiting = await control.quiesceAutomation(automation);
+    const fake = fakeSurface(session);
+    const consoleServer = await startOperatorConsole({ control, surface: fake.surface });
+    consoles.push(consoleServer);
+
+    await assert.rejects(
+      consoleServer.openIntervention({
+        runId: "run-pre-quiesced-stale",
+        capability: "member.balance.lookup",
+        currentStep: "discovery-loop",
+        reason: "Manual recovery required",
+        stoppedBecause: "Discovery is already quiesced",
+        session,
+        automationGrant: automation,
+        preQuiescedEpoch: waiting.epoch + 1,
+        evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+      }),
+      /does not match the current control epoch/u,
+    );
+
+    await assert.rejects(
+      consoleServer.openIntervention({
+        runId: "run-pre-quiesced-old-grant",
+        capability: "member.balance.lookup",
+        currentStep: "discovery-loop",
+        reason: "Manual recovery required",
+        stoppedBecause: "Discovery is already quiesced",
+        session,
+        automationGrant: { ...automation, epoch: automation.epoch - 1 },
+        preQuiescedEpoch: waiting.epoch,
+        evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+      }),
+      /does not match the current control epoch/u,
+    );
+
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-pre-quiesced-valid",
+      capability: "member.balance.lookup",
+      currentStep: "discovery-loop",
+      reason: "Manual recovery required",
+      stoppedBecause: "Discovery is already quiesced",
+      session,
+      automationGrant: automation,
+      preQuiescedEpoch: waiting.epoch,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "restored" }),
+    });
+    assert.equal(intervention.state().control.phase, "AWAITING_OPERATOR");
+    assert.equal(intervention.state().control.epoch, waiting.epoch);
+    assert.equal(intervention.audit()[0]?.action, "automation_paused");
+  });
+
+  it("fails closed before surface dispatch when durable audit persistence fails", async () => {
+    const session: SurfaceSession = {
+      id: "surface-audit-failure",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session);
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      authorizeOperatorAction: allowLoopbackDemoOperatorAction,
+      auditSink: async (event) => {
+        if (event.action === "operator_action_authorized") {
+          throw new Error("synthetic durable sink failure");
+        }
+        return { eventId: event.eventId, durable: true };
+      },
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-audit-failure",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "Audit failure is under test",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+    });
+    const waiting = intervention.state();
+    const claimResponse = await post(intervention.url, "claim", {
+      operatorId: "operator-audit-test",
+      expectedEpoch: waiting.control.epoch,
+    });
+    const claim = await responseJson<{ claimId: string; epoch: number }>(claimResponse);
+
+    const action = await post(intervention.url, "click", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+      x: 120,
+      y: 120,
+    });
+    assert.equal(action.status, 503, await action.clone().text());
+    assert.equal(
+      (await responseJson<{ error: { code: string } }>(action)).error.code,
+      "AUDIT_UNAVAILABLE",
+    );
+    assert.equal(fake.calls.clicks.length, 0);
+    assert.equal(intervention.state().canAct, false);
+    assert.equal(intervention.state().canResume, false);
+    assert.equal(intervention.audit().at(-1)?.action, "audit_sink_failed");
+
+    const secondAction = await post(intervention.url, "capture", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+    });
+    assert.equal(secondAction.status, 503);
+    assert.equal(fake.calls.captures, 0);
+  });
+
+  it("serializes authorization and dispatch for concurrent operator mutations", async () => {
+    const session: SurfaceSession = {
+      id: "surface-serialized-actions",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session);
+    const authorized: OperatorAuthorizationContext["action"][] = [];
+    let releaseFirst: () => void = () => undefined;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let signalFirstEntered: () => void = () => undefined;
+    const firstEntered = new Promise<void>((resolve) => {
+      signalFirstEntered = resolve;
+    });
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      authorizeOperatorAction: async (context) => {
+        authorized.push(context.action);
+        if (authorized.length === 1) {
+          signalFirstEntered();
+          await firstBlocked;
+        }
+        return allowLoopbackDemoOperatorAction(context);
+      },
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-serialized-actions",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "Concurrent action serialization is under test",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+    });
+    const waiting = intervention.state();
+    const claimResponse = await post(intervention.url, "claim", {
+      operatorId: "operator-serialized",
+      expectedEpoch: waiting.control.epoch,
+    });
+    const claim = await responseJson<{ claimId: string; epoch: number }>(claimResponse);
+
+    const click = post(intervention.url, "click", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+      x: 100,
+      y: 100,
+    });
+    await firstEntered;
+    const type = post(intervention.url, "type", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+      value: "synthetic",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(authorized, ["activate_coordinate"]);
+    assert.equal(fake.calls.clicks.length, 0);
+    assert.equal(fake.calls.typedCharacterCounts.length, 0);
+
+    releaseFirst();
+    assert.equal((await click).status, 200);
+    assert.equal((await type).status, 200);
+    assert.deepEqual(authorized, ["activate_coordinate", "type"]);
+    assert.equal(fake.calls.clicks.length, 1);
+    assert.equal(fake.calls.typedCharacterCounts.length, 1);
+  });
+
+  it("does not create an inaccessible claim when claim audit persistence fails", async () => {
+    const session: SurfaceSession = {
+      id: "surface-claim-audit-failure",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session);
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      auditSink: async (event) => {
+        if (event.action === "control_claimed") {
+          const transitioned = control.snapshot(session.id);
+          assert.equal(transitioned.phase, "OPERATOR_ACTIVE");
+          assert.equal(transitioned.owner?.id, "operator-claim-audit");
+          throw new Error("synthetic claim audit failure");
+        }
+        return { eventId: event.eventId, durable: true };
+      },
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-claim-audit-failure",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "Claim audit failure is under test",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+    });
+    const resumeRejected = assert.rejects(intervention.waitForResume(), /auditing failed closed/u);
+    const claim = await post(intervention.url, "claim", {
+      operatorId: "operator-claim-audit",
+      expectedEpoch: intervention.state().control.epoch,
+    });
+
+    assert.equal(claim.status, 503, await claim.clone().text());
+    assert.equal(control.snapshot(session.id).phase, "FAILED");
+    assert.equal(control.snapshot(session.id).owner, null);
+    assert.equal(intervention.state().canClaim, false);
+    await resumeRejected;
+  });
+
+  it("keeps resume waiters and authority consistent when return audit persistence fails", async () => {
+    const session: SurfaceSession = {
+      id: "surface-return-audit-failure",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session);
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      authorizeOperatorAction: allowLoopbackDemoOperatorAction,
+      auditSink: async (event) => {
+        if (event.action === "control_returned") {
+          const transitioned = control.snapshot(session.id);
+          assert.equal(transitioned.phase, "AUTOMATION_ACTIVE");
+          assert.equal(transitioned.owner?.kind, "automation");
+          throw new Error("synthetic return audit failure");
+        }
+        return { eventId: event.eventId, durable: true };
+      },
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-return-audit-failure",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "Return audit failure is under test",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "restored" }),
+    });
+    const claimResponse = await post(intervention.url, "claim", {
+      operatorId: "operator-return-audit",
+      expectedEpoch: intervention.state().control.epoch,
+    });
+    const claim = await responseJson<{ claimId: string; epoch: number }>(claimResponse);
+    const resumeRejected = assert.rejects(intervention.waitForResume(), /auditing failed closed/u);
+    const resume = await post(intervention.url, "resume", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+    });
+
+    assert.equal(resume.status, 503, await resume.clone().text());
+    assert.equal(control.snapshot(session.id).phase, "FAILED");
+    assert.equal(control.snapshot(session.id).owner, null);
+    await resumeRejected;
+  });
+
+  it("never returns a claim that expires while durable completion is pending", async () => {
+    const session: SurfaceSession = {
+      id: "surface-short-claim-lease",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session);
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      auditSink: async (event) => {
+        if (event.action === "control_claimed") {
+          assert.equal(control.snapshot(session.id).phase, "OPERATOR_ACTIVE");
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return { eventId: event.eventId, durable: true };
+      },
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-short-claim-lease",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "Short claim lease race is under test",
+      session,
+      automationGrant: automation,
+      operatorLeaseTtlMs: 5,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+    });
+    const claim = await post(intervention.url, "claim", {
+      operatorId: "operator-short-lease",
+      expectedEpoch: intervention.state().control.epoch,
+    });
+
+    assert.equal(claim.status, 409, await claim.clone().text());
+    assert.equal(control.snapshot(session.id).phase, "AWAITING_OPERATOR");
+    assert.equal(control.snapshot(session.id).owner, null);
+    assert.equal(intervention.state().canClaim, true);
+  });
+
+  it("serializes a live screenshot refresh before the fresh resume observation", async () => {
+    const session: SurfaceSession = {
+      id: "surface-screenshot-resume-race",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    let markFirstObservationStarted: (() => void) | undefined;
+    let releaseFirstObservation: (() => void) | undefined;
+    const firstObservationStarted = new Promise<void>((resolve) => {
+      markFirstObservationStarted = resolve;
+    });
+    const firstObservationGate = new Promise<void>((resolve) => {
+      releaseFirstObservation = resolve;
+    });
+    const fake = fakeSurface(session, undefined, async (observationNumber) => {
+      if (observationNumber !== 1) return;
+      markFirstObservationStarted?.();
+      await firstObservationGate;
+    });
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      authorizeOperatorAction: allowLoopbackDemoOperatorAction,
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-screenshot-resume-race",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "Screenshot and return overlap is under test",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "Session restored" }),
+    });
+    const claimResponse = await post(intervention.url, "claim", {
+      operatorId: "operator-race-test",
+      expectedEpoch: intervention.state().control.epoch,
+    });
+    assert.equal(claimResponse.status, 200);
+    const claim = await responseJson<{ claimId: string; epoch: number }>(claimResponse);
+
+    const screenshot = operatorGet(intervention.url, "screenshot");
+    await firstObservationStarted;
+    const resume = post(intervention.url, "resume", {
+      claimId: claim.claimId,
+      epoch: claim.epoch,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(fake.calls.observe, 1);
+
+    releaseFirstObservation?.();
+    assert.equal((await screenshot).status, 200);
+    const resumeResponse = await resume;
+    assert.equal(resumeResponse.status, 200, await resumeResponse.clone().text());
+    const resumed = await intervention.waitForResume();
+    assert.equal(resumed.observation.id, "observation-2");
+    const cached = await operatorGet(intervention.url, "screenshot");
+    assert.equal(cached.headers.get("x-handrail-observation-id"), resumed.observation.id);
+    assert.equal(fake.calls.observe, 2);
+  });
+
+  it("recovers a handoff after one transient observation failure", async () => {
+    const session: SurfaceSession = {
+      id: "surface-transient-observation-recovery",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session, undefined, async (observationNumber) => {
+      if (observationNumber === 1) throw new Error("synthetic transient observation failure");
+    });
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      authorizeOperatorAction: allowLoopbackDemoOperatorAction,
+    });
+    consoles.push(consoleServer);
+    const intervention = await consoleServer.openIntervention({
+      runId: "run-transient-observation-recovery",
+      capability: "member.balance.lookup",
+      currentStep: "search-member",
+      reason: "Manual recovery required",
+      stoppedBecause: "A transient observation failure is under test",
+      session,
+      automationGrant: automation,
+      evaluateCheckpoint: async () => ({ passed: true, observed: "Session restored" }),
+    });
+
+    const failedScreenshot = await operatorGet(intervention.url, "screenshot");
+    assert.equal(failedScreenshot.status, 500);
+    assert.equal(intervention.state().connected, false);
+    assert.equal(intervention.state().canClaim, false);
+
+    const recoveredStateResponse = await operatorGet(intervention.url, "state");
+    assert.equal(recoveredStateResponse.status, 200);
+    const recoveredState = await responseJson<{
+      connected: boolean;
+      canClaim: boolean;
+      latestObservation?: { id: string };
+      control: { epoch: number };
+    }>(recoveredStateResponse);
+    assert.equal(recoveredState.connected, true);
+    assert.equal(recoveredState.canClaim, true);
+    assert.equal(recoveredState.latestObservation?.id, "observation-2");
+    assert.equal(fake.calls.observe, 2);
+
+    const claim = await post(intervention.url, "claim", {
+      operatorId: "operator-reconnect-test",
+      expectedEpoch: recoveredState.control.epoch,
+    });
+    assert.equal(claim.status, 200, await claim.clone().text());
+    assert.equal(intervention.state().connected, true);
+  });
+
+  it("fails and closes a quiesced session when the initial pause audit is unavailable", async () => {
+    const session: SurfaceSession = {
+      id: "surface-initial-audit-failure",
+      adapter: "playwright-web",
+      createdAt: "2026-08-27T18:00:00.000Z",
+      viewport: { width: 1280, height: 800 },
+    };
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease(session.id, "runtime");
+    const fake = fakeSurface(session);
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface: fake.surface,
+      auditSink: async () => {
+        throw new Error("durable audit unavailable");
+      },
+    });
+    consoles.push(consoleServer);
+
+    await assert.rejects(
+      consoleServer.openIntervention({
+        runId: "run-initial-audit-failure",
+        capability: "member.balance.lookup",
+        currentStep: "search-member",
+        reason: "Manual recovery required",
+        stoppedBecause: "Initial audit durability is under test",
+        session,
+        automationGrant: automation,
+        evaluateCheckpoint: async () => ({ passed: true, observed: "not reached" }),
+      }),
+      /auditing failed closed/u,
+    );
+    assert.equal(control.snapshot(session.id).phase, "FAILED");
+    assert.equal(control.snapshot(session.id).owner, null);
+    assert.equal(fake.calls.closeSession, 1);
+    assert.throws(() => consoleServer.state(session.id), /Unknown operator session/u);
   });
 
   it("validates intervention metadata before revoking automation", async () => {

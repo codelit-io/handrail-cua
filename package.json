@@ -8,6 +8,7 @@
     "node": ">=22.18"
   },
   "scripts": {
+    "approve": "tsx src/cli.ts approve",
     "build": "tsc --noEmit",
     "catalog": "tsx src/cli.ts catalog",
     "demo:offline": "tsx src/cli.ts demo --planner scripted",

@@ -152,4 +152,66 @@ describe("control coordinator", () => {
       Date.now = originalNow;
     }
   });
+
+  it("returns an admitted operator mutation before expiring control at its safe boundary", async () => {
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease("surface-mid-action-expiry");
+    control.requestPause(automation, "Human decision required");
+    await control.quiesceAutomation(automation);
+
+    const originalNow = Date.now;
+    let nowMs = originalNow();
+    Date.now = () => nowMs;
+    try {
+      const operator = control.claimOperator("surface-mid-action-expiry", "operator-demo", 1_000);
+      let mutations = 0;
+
+      const receipt = await control.withControl(operator, async () => {
+        mutations += 1;
+        nowMs += 1_001;
+        const inFlightSnapshot = control.snapshot(operator.sessionId);
+        assert.equal(inFlightSnapshot.phase, "OPERATOR_ACTIVE");
+        assert.equal(inFlightSnapshot.owner?.id, "operator-demo");
+        assert.throws(
+          () => control.claimOperator(operator.sessionId, "second-operator"),
+          (error: unknown) => error instanceof ControlError && error.code === "LEASE_EXPIRED",
+        );
+        return { changedSurface: true, sequence: mutations };
+      });
+
+      assert.deepEqual(receipt, { changedSurface: true, sequence: 1 });
+      assert.equal(mutations, 1);
+      const waiting = control.snapshot(operator.sessionId);
+      assert.equal(waiting.phase, "AWAITING_OPERATOR");
+      assert.equal(waiting.owner, null);
+      assert.equal(waiting.expiresAt, null);
+      assert.equal(waiting.epoch, operator.epoch + 1);
+      assert.throws(
+        () => control.assertGrant(operator),
+        (error: unknown) => error instanceof ControlError && error.code === "CONTROL_LOST",
+      );
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  it("fails an exact unowned handoff epoch when no actor grant remains", async () => {
+    const control = new ControlCoordinator();
+    const automation = control.createAutomationLease("surface-quiesced-failure");
+    control.requestPause(automation, "Operator handoff requested");
+    const waiting = await control.quiesceAutomation(automation);
+
+    await assert.rejects(
+      control.failQuiesced(waiting.sessionId, waiting.epoch + 1, "Wrong epoch"),
+      (error: unknown) => error instanceof ControlError && error.code === "CONTROL_LOST",
+    );
+    const failed = await control.failQuiesced(
+      waiting.sessionId,
+      waiting.epoch,
+      "Initial operator audit persistence failed.",
+    );
+    assert.equal(failed.phase, "FAILED");
+    assert.equal(failed.owner, null);
+    assert.equal(failed.reason, "Initial operator audit persistence failed.");
+  });
 });

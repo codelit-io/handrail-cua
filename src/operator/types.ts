@@ -22,6 +22,8 @@ export interface OperatorAuthorizationContext {
   readonly effect: EffectClass;
   readonly session: SurfaceSession;
   readonly sessionId: string;
+  /** Fresh top-level URL observed immediately before policy authorization. */
+  readonly currentUrl: string;
   readonly ownerEpoch: number;
   readonly operatorId: string;
   readonly operatorLeaseExpiresAt: string;
@@ -48,11 +50,15 @@ export type OperatorActionAuthorizer = (
 
 export type OperatorAuditAction =
   | "automation_paused"
+  | "control_claim_authorized"
   | "control_claimed"
+  | "operator_action_authorized"
   | "operator_clicked"
   | "operator_typed"
   | "operator_pressed_key"
   | "evidence_captured"
+  | "resume_checkpoint_failed"
+  | "return_control_authorized"
   | "control_returned"
   | "audit_sink_failed";
 
@@ -108,6 +114,11 @@ export interface OpenOperatorInterventionInput {
   readonly session: SurfaceSession;
   /** The current automation grant, revoked when this intervention opens. */
   readonly automationGrant: ControlGrant;
+  /**
+   * Discovery may already have drained and revoked automation before creating
+   * its typed intervention. This must match that exact awaiting-operator epoch.
+   */
+  readonly preQuiescedEpoch?: number;
   readonly automationId?: string;
   readonly operatorLeaseTtlMs?: number;
   readonly automationLeaseTtlMs?: number;

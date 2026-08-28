@@ -32,6 +32,7 @@ import {
   bindArtifactInputs,
   bindReviewedTargetOverrides,
   bindValueExpression,
+  computeArtifactApprovalDigest,
   TargetOverrideReviewError,
   validateArtifactOutputs,
 } from "./artifact.js";
@@ -46,6 +47,7 @@ import {
   type PolicyLayer,
   type PolicyStack,
   routeMatches,
+  surfaceAccessPolicy,
 } from "./policy.js";
 
 const ZERO_MODEL_CALLS = 0 as const;
@@ -139,7 +141,7 @@ export interface ReplayEngineOptions {
   readonly runTimeoutMs?: number;
   readonly closeSessionOnFinish?: boolean;
   readonly surfaceSentinels?: readonly ReplaySurfaceSentinel[];
-  /** `strict` requires a valid artifact approval; default `non_strict` preserves discovery/demo use. */
+  /** `strict` requires a valid artifact approval and is the fail-closed default. */
   readonly artifactApprovalMode?: "strict" | "non_strict";
   /**
    * Optional same-session handoff bridge. It may pause/claim/return control once per run.
@@ -494,6 +496,8 @@ function predicateContext(state: ExecutionState): PredicateContext {
     outputs: state.outputs,
     inputs: { ...state.inputs },
     targets: state.targets,
+    grant: state.grant,
+    expectedUrl: state.currentUrl,
   };
 }
 
@@ -639,7 +643,7 @@ export class ReplayEngine {
     ) {
       throw new TypeError("artifactApprovalMode must be strict or non_strict.");
     }
-    this.#artifactApprovalMode = options.artifactApprovalMode ?? "non_strict";
+    this.#artifactApprovalMode = options.artifactApprovalMode ?? "strict";
     this.#onIntervention = options.onIntervention;
     if (this.#runTimeoutMs < 100 || this.#runTimeoutMs > 30 * 60_000) {
       throw new RangeError("runTimeoutMs must be between 100ms and 30 minutes.");
@@ -669,6 +673,10 @@ export class ReplayEngine {
     }
 
     const { artifact, binding, inputs, targets, policy, entryUrl } = preflight;
+    const artifactApprovalDigest =
+      invocation.artifactApproval === undefined
+        ? undefined
+        : computeArtifactApprovalDigest(invocation.artifactApproval);
     const consumedBoundApprovalIds = new Set<string>();
     let sessionId = "session-pending";
     let grant: ControlGrant | undefined;
@@ -692,7 +700,7 @@ export class ReplayEngine {
         consumedBoundApprovalIds,
       );
 
-      const session = await this.#surface.createSession(binding);
+      const session = await this.#surface.createSession(binding, surfaceAccessPolicy(policy));
       sessionId = session.id;
       grant = this.#control.createAutomationLease(sessionId, runId);
       await this.#event({
@@ -700,6 +708,8 @@ export class ReplayEngine {
         type: "replay.started",
         artifactId: artifact.id,
         artifactDigest: artifact.digest,
+        artifactApprovalMode: this.#artifactApprovalMode,
+        ...(artifactApprovalDigest ? { artifactApprovalDigest } : {}),
         sessionId,
         modelCalls: ZERO_MODEL_CALLS,
       });
@@ -720,7 +730,7 @@ export class ReplayEngine {
         ...(this.#resolveSecret ? { resolveSecret: this.#resolveSecret } : {}),
         sessionId,
         grant,
-        currentUrl: pathUrl(binding.origin, observation.route),
+        currentUrl: observation.url,
         latestObservation: observation,
         actionSequence: 0,
         handledInterventions: 0,
@@ -740,8 +750,8 @@ export class ReplayEngine {
         state.currentStepId = step.id;
         const outcome = await this.#executeStepWithHandoff(step, state);
         if (outcome) {
-          const snapshot = await this.#control.complete(state.grant);
           const evidence = await this.#checkpointEvidence(state, `outcome-${outcome.code}`);
+          const snapshot = await this.#control.complete(state.grant);
           const result: RunResult = {
             status: "business_outcome",
             outcome: {
@@ -767,8 +777,8 @@ export class ReplayEngine {
 
       const knownOutcome = await this.#knownOutcome(state);
       if (knownOutcome) {
-        const snapshot = await this.#control.complete(state.grant);
         const evidence = await this.#checkpointEvidence(state, `outcome-${knownOutcome.code}`);
+        const snapshot = await this.#control.complete(state.grant);
         const result: RunResult = {
           status: "business_outcome",
           outcome: {
@@ -833,7 +843,7 @@ export class ReplayEngine {
           sessionId,
           modelCalls: ZERO_MODEL_CALLS,
         });
-        return {
+        const result: RunResult = {
           status: "needs_intervention",
           intervention,
           meta: this.#meta(
@@ -845,15 +855,17 @@ export class ReplayEngine {
             intervention.ownerEpoch,
           ),
         };
+        await this.#completeEvent(result);
+        return result;
       }
 
+      const failureEvidence = state
+        ? await this.#checkpointEvidence(state, `failure-${normalizedError.code}`).catch(() => [])
+        : [];
       const currentGrant = state?.grant ?? grant;
       const ownerEpoch = currentGrant
         ? await this.#failControl(currentGrant, normalizedError.message)
         : 0;
-      const failureEvidence = state
-        ? await this.#checkpointEvidence(state, `failure-${normalizedError.code}`).catch(() => [])
-        : [];
       const fault = {
         ...faultFrom(normalizedError, "replay", state?.currentStepId),
         evidence: failureEvidence,
@@ -865,12 +877,14 @@ export class ReplayEngine {
         sessionId,
         modelCalls: ZERO_MODEL_CALLS,
       }).catch(() => undefined);
-      if (sessionId !== "session-pending") await this.#closeFinishedSession(sessionId);
-      return {
+      const result: RunResult = {
         status: "failed",
         error: fault,
         meta: this.#meta(runId, artifact.id, artifact.digest, sessionId, startedAt, ownerEpoch),
       };
+      await this.#completeEvent(result).catch(() => undefined);
+      if (sessionId !== "session-pending") await this.#closeFinishedSession(sessionId);
+      return result;
     }
   }
 
@@ -1023,6 +1037,16 @@ export class ReplayEngine {
       observation: state.latestObservation,
     });
 
+    if (resolution.automationGrant.sessionId === state.sessionId) {
+      try {
+        this.#control.assertGrant(resolution.automationGrant, "automation");
+        state.grant = resolution.automationGrant;
+      } catch {
+        // The validation below reports a stale/invalid return. Keeping the
+        // prior grant lets outer cleanup revoke whichever candidate is valid.
+      }
+    }
+
     if (
       resolution.sessionId !== state.sessionId ||
       resolution.automationGrant.sessionId !== state.sessionId ||
@@ -1067,7 +1091,7 @@ export class ReplayEngine {
 
     state.grant = resolution.automationGrant;
     state.latestObservation = resolution.observation;
-    state.currentUrl = pathUrl(state.bindingOrigin, resolution.observation.route);
+    state.currentUrl = resolution.observation.url;
     if (resolution.observation.id === previousObservationId) {
       throw new ReplayStepError({
         code: "POSTCONDITION_FAILED",
@@ -1174,7 +1198,7 @@ export class ReplayEngine {
           });
           if (step.retry.delayMs > 0) await this.#sleep(step.retry.delayMs);
           state.latestObservation = await this.#surface.observe(state.sessionId);
-          state.currentUrl = pathUrl(state.bindingOrigin, state.latestObservation.route);
+          state.currentUrl = state.latestObservation.url;
           continue;
         }
         if (configuredRetry && attempt === step.retry.maxAttempts) {
@@ -1221,6 +1245,7 @@ export class ReplayEngine {
           inputs: { ...state.inputs },
           grant: state.grant,
           signal,
+          expectedUrl: state.currentUrl,
         });
         this.#throwIfAborted(signal);
         break;
@@ -1240,13 +1265,20 @@ export class ReplayEngine {
           inputs: { ...state.inputs },
           grant: state.grant,
           signal,
+          expectedUrl: state.currentUrl,
         });
         this.#throwIfAborted(signal);
         break;
       }
       case "press_key":
         resolveReplayElement(this.#target(state, step.target), state.latestObservation);
-        await this.#surface.pressKey(state.sessionId, step.key, state.grant, signal);
+        await this.#surface.pressKey(
+          state.sessionId,
+          step.key,
+          state.grant,
+          signal,
+          state.currentUrl,
+        );
         this.#throwIfAborted(signal);
         break;
       case "wait_for": {
@@ -1275,7 +1307,14 @@ export class ReplayEngine {
       }
       case "extract": {
         const target = this.#target(state, step.extractor.target);
-        const value = await this.#surface.extract(state.sessionId, target, step.extractor, signal);
+        const value = await this.#surface.extract(
+          state.sessionId,
+          target,
+          step.extractor,
+          signal,
+          state.grant,
+          state.currentUrl,
+        );
         this.#throwIfAborted(signal);
         state.outputs[step.output] = value;
         state.stepOutputs[step.id] = { [step.output]: value };
@@ -1297,7 +1336,7 @@ export class ReplayEngine {
     const observation = await this.#surface.observe(state.sessionId, signal);
     this.#throwIfAborted(signal);
     state.latestObservation = observation;
-    state.currentUrl = pathUrl(state.bindingOrigin, observation.route);
+    state.currentUrl = observation.url;
   }
 
   #authorize(step: Step, state: ExecutionState): void {
@@ -1395,7 +1434,7 @@ export class ReplayEngine {
         const observation = await this.#surface.observe(state.sessionId, signal);
         this.#throwIfAborted(signal);
         state.latestObservation = observation;
-        state.currentUrl = pathUrl(state.bindingOrigin, observation.route);
+        state.currentUrl = observation.url;
         sentinel.pattern.lastIndex = 0;
         if (!sentinel.pattern.test(observation.visibleText)) {
           await this.#event({
@@ -1507,7 +1546,13 @@ export class ReplayEngine {
   async #checkpointEvidence(state: ExecutionState, label: string, signal?: AbortSignal) {
     if (!this.#evidence || !this.#screenshotRedactionVerified) return [];
     if (signal) this.#throwIfAborted(signal);
-    const screenshot = await this.#surface.captureEvidence(state.sessionId, label, signal);
+    const screenshot = await this.#surface.captureEvidence(
+      state.sessionId,
+      label,
+      signal,
+      state.currentUrl,
+      state.grant,
+    );
     if (signal) this.#throwIfAborted(signal);
     const safeLabel = label.replaceAll(/[^A-Za-z0-9._-]/gu, "-").slice(0, 100);
     const ref = await this.#evidence.writeScreenshot(
@@ -1533,6 +1578,7 @@ export class ReplayEngine {
     await this.#event({
       runId: result.meta.runId,
       type: "replay.completed",
+      timestamp: result.meta.finishedAt,
       status: result.status,
       durationMs: result.meta.durationMs,
       modelCalls: ZERO_MODEL_CALLS,

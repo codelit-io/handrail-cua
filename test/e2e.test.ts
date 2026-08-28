@@ -209,7 +209,7 @@ async function calibrateArtifact(
       },
       effects: ["read", "reversible_write"],
       policyRequirements: {
-        allowedRoutes: ["/legacy"],
+        allowedRoutes: ["/legacy", "/legacy/**"],
         allowedCommands: ["navigate", "set_value", "activate", "extract"],
         allowedEffects: ["read", "reversible_write"],
         approvalRequiredFor: [],
@@ -350,6 +350,7 @@ describe("real-browser end-to-end replay", { concurrency: 1 }, () => {
       surface,
       control,
       platformPolicy: options.platformPolicy ?? createDemoPolicyStack(binding).platform,
+      artifactApprovalMode: "non_strict",
       ...(options.sentinels ? { surfaceSentinels: options.sentinels } : {}),
       ...(options.onIntervention ? { onIntervention: options.onIntervention } : {}),
     });
@@ -526,9 +527,13 @@ describe("real-browser end-to-end replay", { concurrency: 1 }, () => {
       assert.equal(result.meta.modelCalls, 0);
       assert.deepEqual(auditActions, [
         "automation_paused",
+        "control_claim_authorized",
         "control_claimed",
+        "operator_action_authorized",
         "operator_clicked",
+        "operator_action_authorized",
         "evidence_captured",
+        "return_control_authorized",
         "control_returned",
       ]);
       assert.equal(control.snapshot(handoffSessionId).phase, "COMPLETED");

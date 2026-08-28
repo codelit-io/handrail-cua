@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fileConstants } from "node:fs";
+import { constants as fileConstants, type Stats } from "node:fs";
 import {
   link,
   lstat,
@@ -212,12 +212,46 @@ const DEFAULT_SCAN_FILE_BYTES = 4 * 1_024 * 1_024;
 const DEFAULT_IGNORED_DIRECTORIES = new Set([".git", "node_modules"]);
 const SAFE_CANARY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_EVENT_ID = /^[A-Za-z][A-Za-z0-9._-]{1,127}$/u;
-const APPEND_NOFOLLOW_FLAGS =
+const CREATE_EVENT_NOFOLLOW_FLAGS =
   fileConstants.O_APPEND |
   fileConstants.O_CREAT |
+  fileConstants.O_EXCL |
   fileConstants.O_WRONLY |
   (fileConstants.O_NOFOLLOW ?? 0);
+const APPEND_EVENT_NOFOLLOW_FLAGS =
+  fileConstants.O_APPEND | fileConstants.O_WRONLY | (fileConstants.O_NOFOLLOW ?? 0);
 const READ_NOFOLLOW_FLAGS = fileConstants.O_RDONLY | (fileConstants.O_NOFOLLOW ?? 0);
+
+interface EventLogIdentity {
+  readonly device: number;
+  readonly inode: number;
+  readonly expectedSize: number;
+}
+
+function assertTrackedEventLog(metadata: Stats, expected?: EventLogIdentity): void {
+  if (!metadata.isFile()) {
+    throw new Error("Evidence event target must be a regular file.");
+  }
+  if (metadata.nlink !== 1) {
+    throw new Error("Evidence event target must remain a single-link file.");
+  }
+  if (!expected) return;
+  if (metadata.dev !== expected.device || metadata.ino !== expected.inode) {
+    throw new Error("Evidence event target identity changed after creation.");
+  }
+  if (metadata.size !== expected.expectedSize) {
+    throw new Error("Evidence event target size changed outside the writer.");
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === code
+  );
+}
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -450,6 +484,35 @@ function projectPredicate(value: unknown): Record<string, unknown> | undefined {
  * page or model text. Runtime objects remain unchanged for live control flow.
  */
 function projectPersistentEvent(event: object, eventType: string): object {
+  if (eventType === "operator.audit") {
+    const projected = pickOwnDataProperties(event, [
+      ...AUDIT_EVENT_BASE_FIELDS,
+      "actorId",
+      "action",
+    ]);
+    const details = ownRecord(ownDataProperty(event, "details"));
+    if (details) {
+      projected.details = pickOwnDataProperties(details, [
+        "action",
+        "effect",
+        "policyGrantMode",
+        "characterCount",
+        "key",
+        "x",
+        "y",
+        "captureId",
+        "sha256",
+        "byteLength",
+        "checkpointPassed",
+        "expectedEpoch",
+        "freshObservationId",
+        "from",
+        "to",
+      ]);
+    }
+    return projected;
+  }
+
   if (eventType === "observation.captured") {
     return pickOwnDataProperties(event, [
       ...AUDIT_EVENT_BASE_FIELDS,
@@ -539,7 +602,70 @@ function projectPersistentEvent(event: object, eventType: string): object {
     return projected;
   }
 
-  return event;
+  if (eventType === "run.started") {
+    return pickOwnDataProperties(event, [...AUDIT_EVENT_BASE_FIELDS, "mode"]);
+  }
+
+  if (eventType === "action.dispatched") {
+    return pickOwnDataProperties(event, [
+      ...AUDIT_EVENT_BASE_FIELDS,
+      "command",
+      "effect",
+      "target",
+    ]);
+  }
+
+  if (eventType === "run.completed") {
+    return pickOwnDataProperties(event, [
+      ...AUDIT_EVENT_BASE_FIELDS,
+      "status",
+      "artifactId",
+      "artifactDigest",
+      "modelCalls",
+    ]);
+  }
+
+  if (eventType === "discovery.intervention.resumed") {
+    return pickOwnDataProperties(event, [
+      ...AUDIT_EVENT_BASE_FIELDS,
+      "priorOwnerEpoch",
+      "newOwnerEpoch",
+      "observationId",
+      "checkpointPassed",
+    ]);
+  }
+
+  if (
+    eventType === "replay.started" ||
+    eventType === "replay.completed" ||
+    eventType === "replay.failed" ||
+    eventType === "replay.step.attempt" ||
+    eventType === "replay.step.completed" ||
+    eventType === "replay.step.retry" ||
+    eventType === "replay.surface.recovered"
+  ) {
+    return pickOwnDataProperties(event, [
+      ...AUDIT_EVENT_BASE_FIELDS,
+      "artifactId",
+      "artifactDigest",
+      "artifactApprovalMode",
+      "artifactApprovalDigest",
+      "status",
+      "durationMs",
+      "modelCalls",
+      "code",
+      "stepId",
+      "command",
+      "attempt",
+      "maxAttempts",
+      "retryKind",
+      "checks",
+    ]);
+  }
+
+  // Unknown/custom event types retain only the canonical envelope. Callers must
+  // add an explicit projection before any new payload field can become durable.
+  return pickOwnDataProperties(event, AUDIT_EVENT_BASE_FIELDS);
 }
 
 /** Produce a bounded, single-line summary without reflecting unredacted values. */
@@ -631,6 +757,7 @@ export class EvidenceWriter {
   private readonly initialized: Promise<string>;
   private appendTail: Promise<void> = Promise.resolve();
   private readonly nextSequenceByRun = new Map<string, number>();
+  private eventLogIdentity: EventLogIdentity | undefined;
 
   constructor(options: EvidenceWriterOptions) {
     if (!path.isAbsolute(options.rootDirectory)) {
@@ -830,22 +957,47 @@ export class EvidenceWriter {
       }
 
       const output = await this.resolveOutput(this.eventsPath);
-      const handle = await open(output.absolute, APPEND_NOFOLLOW_FLAGS, 0o600);
+      const expected = this.eventLogIdentity;
+      let handle: Awaited<ReturnType<typeof open>>;
+      try {
+        handle = await open(
+          output.absolute,
+          expected ? APPEND_EVENT_NOFOLLOW_FLAGS : CREATE_EVENT_NOFOLLOW_FLAGS,
+          0o600,
+        );
+      } catch (error) {
+        if (!expected && hasErrorCode(error, "EEXIST")) {
+          throw new Error("Evidence event log must not exist before the first append.");
+        }
+        throw error;
+      }
       try {
         const metadata = await handle.stat();
-        if (!metadata.isFile()) {
-          throw new Error("Evidence event target must be a regular file.");
+        assertTrackedEventLog(metadata, expected);
+        if (!expected && metadata.size !== 0) {
+          throw new Error("New evidence event log must be empty.");
         }
+        const beforeWrite: EventLogIdentity = expected ?? {
+          device: metadata.dev,
+          inode: metadata.ino,
+          expectedSize: 0,
+        };
         const result = await handle.write(bytes);
         await handle.sync();
         if (result.bytesWritten !== bytes.byteLength) {
           throw new Error("Evidence event append was incomplete.");
         }
+        const nextIdentity: EventLogIdentity = {
+          ...beforeWrite,
+          expectedSize: beforeWrite.expectedSize + bytes.byteLength,
+        };
+        assertTrackedEventLog(await handle.stat(), nextIdentity);
+        this.eventLogIdentity = nextIdentity;
         this.nextSequenceByRun.set(runIdValue, nextSequence + 1);
         return {
           eventId,
           relativePath: output.relative,
-          byteOffset: metadata.size,
+          byteOffset: beforeWrite.expectedSize,
           byteLength: bytes.byteLength,
           lineSha256: sha256(bytes),
         };
@@ -889,29 +1041,35 @@ export class EvidenceWriter {
 
   /** Create a stable ref for the current append-only event log after all appends finish. */
   async eventLogRef(): Promise<EvidenceRef> {
-    await this.appendTail;
-    const output = await this.resolveOutput(this.eventsPath);
-    const handle = await open(output.absolute, READ_NOFOLLOW_FLAGS);
-    let bytes: Buffer;
-    try {
-      const metadata = await handle.stat();
-      if (!metadata.isFile()) {
-        throw new Error("Evidence event target must be a regular file.");
+    return this.enqueueAppend(async () => {
+      const expected = this.eventLogIdentity;
+      if (!expected) {
+        throw new Error("Evidence event log has not been created by this writer.");
       }
-      bytes = await handle.readFile();
-    } finally {
-      await handle.close();
-    }
-    const digest = sha256(bytes);
-    return {
-      id: `ev_${digest.slice(0, 24)}`,
-      kind: "event_log",
-      relativePath: output.relative,
-      sha256: digest,
-      byteLength: bytes.byteLength,
-      mimeType: "application/x-ndjson",
-      createdAt: isoTimestamp(this.now()),
-    };
+      const output = await this.resolveOutput(this.eventsPath);
+      const handle = await open(output.absolute, READ_NOFOLLOW_FLAGS);
+      let bytes: Buffer;
+      try {
+        assertTrackedEventLog(await handle.stat(), expected);
+        bytes = await handle.readFile();
+        assertTrackedEventLog(await handle.stat(), expected);
+        if (bytes.byteLength !== expected.expectedSize) {
+          throw new Error("Evidence event target changed while it was being read.");
+        }
+      } finally {
+        await handle.close();
+      }
+      const digest = sha256(bytes);
+      return {
+        id: `ev_${digest.slice(0, 24)}`,
+        kind: "event_log",
+        relativePath: output.relative,
+        sha256: digest,
+        byteLength: bytes.byteLength,
+        mimeType: "application/x-ndjson",
+        createdAt: isoTimestamp(this.now()),
+      };
+    });
   }
 }
 

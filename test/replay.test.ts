@@ -10,10 +10,14 @@ import {
   type ModelDecision,
   RunResultSchema,
 } from "../src/domain/schema.js";
-import { compileArtifact, computeTargetDigest } from "../src/runtime/artifact.js";
+import {
+  compileArtifact,
+  computeArtifactApprovalDigest,
+  computeTargetDigest,
+} from "../src/runtime/artifact.js";
 import { ControlCoordinator, ControlError, type ControlGrant } from "../src/runtime/control.js";
 import type { BoundApproval } from "../src/runtime/policy.js";
-import { ReplayEngine } from "../src/runtime/replay.js";
+import { ReplayEngine, replayCapability } from "../src/runtime/replay.js";
 import { BrowserSurface } from "../src/surface/browser-surface.js";
 import type { ActionReceipt, DispatchContext } from "../src/surface/types.js";
 import { startLegacyTarget } from "../src/target/server.js";
@@ -32,6 +36,7 @@ function engine(surface: FakeReplaySurface): ReplayEngine {
     surface,
     control: new ControlCoordinator(),
     platformPolicy,
+    artifactApprovalMode: "non_strict",
     now: () => new Date("2026-08-27T18:00:00.000Z"),
     sleep: async () => undefined,
   });
@@ -145,6 +150,27 @@ class UncooperativeDelayedSurface extends FakeReplaySurface {
   }
 }
 
+class ControlCheckingEvidenceSurface extends FakeReplaySurface {
+  constructor(
+    readonly control: ControlCoordinator,
+    terminalCheckpointFails = false,
+  ) {
+    super("none", terminalCheckpointFails);
+  }
+
+  override async captureEvidence(
+    _sessionId: string,
+    _label: string,
+    _signal?: AbortSignal,
+    _expectedUrl?: string,
+    grant?: ControlGrant,
+  ): Promise<Buffer> {
+    assert.ok(grant);
+    this.control.assertGrant(grant, "automation");
+    return super.captureEvidence(_sessionId, _label, _signal, _expectedUrl, grant);
+  }
+}
+
 function artifactWithFirstStepTimeout(timeoutMs: number) {
   const { digest: _digest, ...draft } = structuredClone(replayArtifact());
   return compileArtifact({
@@ -170,7 +196,7 @@ function artifactApproval(artifact: CapabilityArtifact): ArtifactApproval {
     revision: artifact.revision,
     digest: artifact.digest,
     approvedBy: "reviewer-01",
-    approvedAt: "2026-08-27T17:00:00.000Z",
+    approvedAt: "2026-08-27T18:00:00.000Z",
     expiresAt: "2026-08-27T19:00:00.000Z",
   };
 }
@@ -261,6 +287,116 @@ describe("deterministic capability replay", () => {
     assert.equal(RunResultSchema.safeParse(result).success, true);
   });
 
+  it("captures business-outcome evidence before completing its automation lease", async () => {
+    const control = new ControlCoordinator();
+    const surface = new ControlCheckingEvidenceSurface(control);
+    const screenshotRef = {
+      id: "ev_aaaaaaaaaaaaaaaaaaaaaaaa",
+      kind: "screenshot" as const,
+      relativePath: "screenshots/outcome.png",
+      sha256: "a".repeat(64),
+      byteLength: 8,
+      mimeType: "image/png" as const,
+      createdAt: "2026-08-27T18:00:00.000Z",
+    };
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      screenshotRedactionVerified: true,
+      evidence: {
+        appendEvent: async (_event) => ({
+          eventId: "event-outcome",
+          relativePath: "events.jsonl",
+          byteOffset: 0,
+          byteLength: 1,
+          lineSha256: "b".repeat(64),
+        }),
+        eventLogRef: async () => ({
+          ...screenshotRef,
+          kind: "event_log" as const,
+          relativePath: "events.jsonl",
+          mimeType: "application/x-ndjson" as const,
+        }),
+        writeScreenshot: async () => screenshotRef,
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "00000" },
+      runId: "replay-outcome-evidence-order",
+    });
+
+    assert.equal(result.status, "business_outcome");
+    if (result.status === "business_outcome") {
+      assert.deepEqual(result.evidence, [screenshotRef]);
+      assert.equal(control.snapshot(result.meta.sessionId).phase, "COMPLETED");
+    }
+  });
+
+  it("captures failure evidence before failing its automation lease", async () => {
+    const control = new ControlCoordinator();
+    const surface = new ControlCheckingEvidenceSurface(control, true);
+    const events: Array<Readonly<Record<string, unknown>>> = [];
+    const screenshotRef = {
+      id: "ev_cccccccccccccccccccccccc",
+      kind: "screenshot" as const,
+      relativePath: "screenshots/failure.png",
+      sha256: "c".repeat(64),
+      byteLength: 8,
+      mimeType: "image/png" as const,
+      createdAt: "2026-08-27T18:00:00.000Z",
+    };
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      screenshotRedactionVerified: true,
+      evidence: {
+        appendEvent: async (event) => {
+          if (event.type === "replay.completed") {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          events.push({ ...event });
+          return {
+            eventId: `event-failure-${events.length}`,
+            relativePath: "events.jsonl",
+            byteOffset: events.length - 1,
+            byteLength: 1,
+            lineSha256: "d".repeat(64),
+          };
+        },
+        eventLogRef: async () => ({
+          ...screenshotRef,
+          kind: "event_log" as const,
+          relativePath: "events.jsonl",
+          mimeType: "application/x-ndjson" as const,
+        }),
+        writeScreenshot: async () => screenshotRef,
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-failure-evidence-order",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.deepEqual(result.error.evidence, [screenshotRef]);
+      assert.equal(control.snapshot(result.meta.sessionId).phase, "FAILED");
+      assert.equal(events.at(-2)?.type, "replay.failed");
+      assert.equal(events.at(-1)?.type, "replay.completed");
+      assert.equal(events.at(-1)?.timestamp, result.meta.finishedAt);
+    }
+  });
+
   it("rejects invalid typed input before creating or navigating any surface", async () => {
     const surface = new FakeReplaySurface();
     const result = await engine(surface).run({
@@ -280,6 +416,58 @@ describe("deterministic capability replay", () => {
     assert.equal(surface.navigateCalls, 0);
     assert.equal(surface.observeCalls, 0);
     assert.equal(RunResultSchema.safeParse(result).success, true);
+  });
+
+  it("defaults an omitted artifact approval mode to strict before surface creation", async () => {
+    const surface = new FakeReplaySurface();
+    const result = await new ReplayEngine({
+      surface,
+      control: new ControlCoordinator(),
+      platformPolicy,
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-default-strict-approval-denied",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.phase, "preflight");
+      assert.equal(result.error.code, "ARTIFACT_INVALID");
+      assert.match(result.error.message, /requires a current approval/u);
+    }
+    assert.equal(surface.createCalls, 0);
+    assert.equal(surface.navigateCalls, 0);
+    assert.equal(surface.observeCalls, 0);
+  });
+
+  it("keeps the replayCapability convenience entrypoint strict when mode is omitted", async () => {
+    const surface = new FakeReplaySurface();
+    const result = await replayCapability(
+      {
+        surface,
+        control: new ControlCoordinator(),
+        platformPolicy,
+        now: () => new Date("2026-08-27T18:00:00.000Z"),
+        sleep: async () => undefined,
+      },
+      {
+        artifact: replayArtifact(),
+        binding: replayBinding(),
+        inputs: { memberId: "84721" },
+        runId: "replay-capability-default-strict-denied",
+      },
+    );
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.phase, "preflight");
+      assert.equal(result.error.code, "ARTIFACT_INVALID");
+    }
+    assert.equal(surface.createCalls, 0);
   });
 
   it("strict mode requires an exact, current artifact approval before surface creation", async () => {
@@ -345,6 +533,55 @@ describe("deterministic capability replay", () => {
     });
     assert.equal(nonStrictResult.status, "succeeded");
     assert.equal(nonStrictSurface.createCalls, 1);
+  });
+
+  it("binds strict replay evidence to the exact artifact approval digest", async () => {
+    const artifact = replayArtifact();
+    const approval = artifactApproval(artifact);
+    const events: Array<Readonly<Record<string, unknown>>> = [];
+    const evidenceRef = {
+      id: "ev_aaaaaaaaaaaaaaaaaaaaaaaa",
+      kind: "event_log" as const,
+      relativePath: "events.jsonl",
+      sha256: "a".repeat(64),
+      byteLength: 1,
+      mimeType: "application/x-ndjson",
+      createdAt: "2026-08-27T18:00:00.000Z",
+    };
+    const result = await new ReplayEngine({
+      surface: new FakeReplaySurface(),
+      control: new ControlCoordinator(),
+      platformPolicy,
+      artifactApprovalMode: "strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      evidence: {
+        appendEvent: async (event) => {
+          events.push({ ...event });
+          return {
+            eventId: `event-${events.length}`,
+            relativePath: "events.jsonl",
+            byteOffset: events.length - 1,
+            byteLength: 1,
+            lineSha256: "b".repeat(64),
+          };
+        },
+        eventLogRef: async () => evidenceRef,
+        writeScreenshot: async () => ({ ...evidenceRef, kind: "screenshot" as const }),
+      },
+    }).run({
+      artifact,
+      artifactApproval: approval,
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-strict-evidence-binding",
+    });
+
+    assert.equal(result.status, "succeeded");
+    const started = events.find((event) => event.type === "replay.started");
+    assert.ok(started);
+    assert.equal(started.artifactApprovalMode, "strict");
+    assert.equal(started.artifactApprovalDigest, computeArtifactApprovalDigest(approval));
   });
 
   it("rejects reviewed-content drift before creating a surface", async () => {
@@ -480,6 +717,7 @@ describe("deterministic capability replay", () => {
     const result = await new ReplayEngine({
       surface,
       control: new ControlCoordinator(),
+      artifactApprovalMode: "non_strict",
       platformPolicy: {
         ...platformPolicy,
         allowedEffects: ["read", "reversible_write", "commit"],
@@ -497,6 +735,36 @@ describe("deterministic capability replay", () => {
     assert.equal(surface.activationCalls, 1);
   });
 
+  it("denies a replay action after drift to a secondary binding-allowed origin", async () => {
+    const secondaryOrigin = "http://127.0.0.1:4314";
+    const surface = new FakeReplaySurface();
+    surface.observationOrigin = secondaryOrigin;
+    const bindingWithSecondaryOrigin: AppBinding = {
+      ...replayBinding(),
+      policy: {
+        ...replayBinding().policy,
+        allowedOrigins: ["http://127.0.0.1:4312", secondaryOrigin],
+      },
+    };
+    const result = await new ReplayEngine({
+      surface,
+      control: new ControlCoordinator(),
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+    }).run({
+      artifact: replayArtifact(),
+      binding: bindingWithSecondaryOrigin,
+      inputs: { memberId: "84721" },
+      runId: "replay-secondary-origin-denied",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "POLICY_DENIED");
+    assert.deepEqual(surface.dispatchCommands, []);
+  });
+
   it("consumes a step-bound approval before a commit can be attempted again", async () => {
     const surface = new FakeReplaySurface();
     const control = new ControlCoordinator();
@@ -505,6 +773,7 @@ describe("deterministic capability replay", () => {
     const result = await new ReplayEngine({
       surface,
       control,
+      artifactApprovalMode: "non_strict",
       platformPolicy: {
         ...platformPolicy,
         allowedEffects: ["read", "reversible_write", "commit"],
@@ -588,6 +857,7 @@ describe("deterministic capability replay", () => {
       surface,
       control,
       platformPolicy,
+      artifactApprovalMode: "non_strict",
       now: () => new Date("2026-08-27T18:00:00.000Z"),
       sleep: async () => undefined,
       onIntervention: async (context) => {
@@ -632,6 +902,42 @@ describe("deterministic capability replay", () => {
     assert.equal(result.meta.modelCalls, 0);
   });
 
+  it("revokes a valid returned lease when intervention metadata names a replacement session", async () => {
+    const surface = new FakeReplaySurface("always");
+    const control = new ControlCoordinator();
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      onIntervention: async (context) => {
+        control.requestPause(context.automationGrant, "Operator recovery requested");
+        await control.quiesceAutomation(context.automationGrant);
+        const operatorGrant = control.claimOperator(context.session.id, "operator-replay-test");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        return {
+          sessionId: "replacement-session",
+          automationGrant,
+          observation: await surface.observe(context.session.id),
+          checkpoint: { passed: true, observed: "Synthetic recovery passed." },
+        };
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-wrong-session-return",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "CONTROL_LOST");
+    assert.equal(control.snapshot(result.meta.sessionId).phase, "FAILED");
+    assert.equal(control.snapshot(result.meta.sessionId).owner, null);
+  });
+
   it("cancels and settles a timed-out action before terminal control, close, or return", async () => {
     const control = new ControlCoordinator();
     const surface = new AbortAwareDelayedSurface(control);
@@ -641,6 +947,7 @@ describe("deterministic capability replay", () => {
       surface,
       control,
       platformPolicy,
+      artifactApprovalMode: "non_strict",
       now: () => new Date("2026-08-27T18:00:00.000Z"),
     }).run({
       artifact,
@@ -671,6 +978,7 @@ describe("deterministic capability replay", () => {
       surface,
       control,
       platformPolicy,
+      artifactApprovalMode: "non_strict",
       now: () => new Date("2026-08-27T18:00:00.000Z"),
     })
       .run({
@@ -842,7 +1150,7 @@ describe("deterministic capability replay", () => {
         },
         effects: ["read", "reversible_write"],
         policyRequirements: {
-          allowedRoutes: ["/legacy"],
+          allowedRoutes: ["/legacy", "/legacy/**"],
           allowedCommands: ["navigate", "set_value", "activate", "extract"],
           allowedEffects: ["read", "reversible_write"],
           approvalRequiredFor: [],
@@ -917,6 +1225,7 @@ describe("deterministic capability replay", () => {
         surface,
         control,
         platformPolicy: createDemoPolicyStack(binding).platform,
+        artifactApprovalMode: "non_strict",
       }).run({
         artifact,
         binding,

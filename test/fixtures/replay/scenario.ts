@@ -247,6 +247,8 @@ export class FakeReplaySurface implements SurfaceAdapter {
   dispatchCommands: string[] = [];
   activationCalls = 0;
   currentRoute = "/";
+  bindingOrigin = "http://127.0.0.1:4312";
+  observationOrigin: string | undefined;
   memberValue = "";
   state: "form" | "result" | "not_found" = "form";
 
@@ -255,8 +257,9 @@ export class FakeReplaySurface implements SurfaceAdapter {
     readonly terminalCheckpointFails = false,
   ) {}
 
-  async createSession(_binding: AppBinding): Promise<SurfaceSession> {
+  async createSession(binding: AppBinding): Promise<SurfaceSession> {
     this.createCalls += 1;
+    this.bindingOrigin = binding.origin;
     return {
       id: "surface-replay-01",
       adapter: "playwright-web",
@@ -301,6 +304,7 @@ export class FakeReplaySurface implements SurfaceAdapter {
     return {
       id: `observation-${this.observeCalls}`,
       sessionId,
+      url: `${this.observationOrigin ?? this.bindingOrigin}${this.currentRoute}`,
       route: this.currentRoute,
       title: "Legacy Member Console",
       capturedAt: CREATED_AT,
@@ -396,7 +400,13 @@ export class FakeReplaySurface implements SurfaceAdapter {
     return resolveExpression(expression, inputs);
   }
 
-  async captureEvidence(): Promise<Buffer> {
+  async captureEvidence(
+    _sessionId: string,
+    _label: string,
+    _signal?: AbortSignal,
+    _expectedUrl?: string,
+    _grant?: ControlGrant,
+  ): Promise<Buffer> {
     return Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   }
 

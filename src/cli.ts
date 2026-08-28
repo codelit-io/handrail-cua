@@ -1,8 +1,11 @@
+import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import { createDemoBinding, createDemoPolicyStack, DEMO_GOAL, DEMO_INPUTS } from "./demo/config.js";
 import {
@@ -12,6 +15,7 @@ import {
 } from "./demo/spec.js";
 import {
   type ArtifactApproval,
+  ArtifactApprovalSchema,
   type AutomationFault,
   type CapabilityArtifact,
   CapabilityArtifactSchema,
@@ -22,6 +26,7 @@ import {
   type DiscoveryPlanner,
   OllamaPlanner,
   OpenAiCompatiblePlanner,
+  type PlannerTransport,
   ScriptedPlanner,
 } from "./model/planner.js";
 import {
@@ -30,6 +35,7 @@ import {
   type OperatorResumeResult,
   startOperatorConsole,
 } from "./operator/index.js";
+import { assertArtifactApproval, assertValidArtifact } from "./runtime/artifact.js";
 import { ControlCoordinator } from "./runtime/control.js";
 import {
   DiscoveryEngine,
@@ -52,7 +58,8 @@ import {
   startLegacyTarget,
 } from "./target/server.js";
 
-const COMMANDS = new Set(["catalog", "demo", "discover", "replay", "serve"]);
+const COMMANDS = new Set(["approve", "catalog", "demo", "discover", "replay", "serve"]);
+const execFile = promisify(execFileCallback);
 const SCENARIOS = new Set<LegacyScenario>([
   "normal",
   "notice",
@@ -62,8 +69,10 @@ const SCENARIOS = new Set<LegacyScenario>([
   "off-origin",
 ]);
 const KNOWN_OPTIONS = new Set([
+  "approval-timeout-ms",
   "artifact",
   "artifact-approval",
+  "confirm-reviewed",
   "goal",
   "headless",
   "headed",
@@ -79,6 +88,7 @@ const KNOWN_OPTIONS = new Set([
   "port",
   "replay-member-id",
   "replays",
+  "reviewer",
   "run-id",
   "scenario",
   "screenshots-safe",
@@ -88,8 +98,9 @@ const KNOWN_OPTIONS = new Set([
   "target-port",
 ]);
 
-type Command = "catalog" | "demo" | "discover" | "replay" | "serve";
+type Command = "approve" | "catalog" | "demo" | "discover" | "replay" | "serve";
 type PlannerMode = "scripted" | "live";
+export type TargetSource = "bundled-fixture" | "external";
 
 export interface CliIo {
   readonly cwd: string;
@@ -108,6 +119,8 @@ interface ParsedArguments {
 interface ManagedTarget {
   readonly origin: string;
   readonly entryUrl: string;
+  readonly source: TargetSource;
+  /** The caller asserts that persisted screenshots contain only safe pixels. */
   readonly synthetic: boolean;
   readonly close: () => Promise<void>;
 }
@@ -121,6 +134,8 @@ interface RunEvidence {
   readonly summarySha256: string;
   readonly events: string;
   readonly eventsSha256: string;
+  readonly artifact?: string;
+  readonly artifactSha256?: string;
   readonly screenshots: readonly ScreenshotEvidenceRef[];
 }
 
@@ -145,11 +160,17 @@ interface ScreenshotEvidenceRef {
   readonly mimeType: "image/png";
 }
 
-interface ModelEvidence {
+export interface ResolvedModelEvidence {
   readonly provider: string;
   readonly modelId: string;
   readonly liveModel: boolean;
   readonly digest?: string;
+}
+
+type ModelIdentity = Pick<CapabilityArtifact["provenance"], "provider" | "modelId" | "liveModel">;
+
+export interface ModelEvidence extends ResolvedModelEvidence {
+  readonly transport: PlannerTransport;
 }
 
 interface RuntimeProvenance {
@@ -163,6 +184,7 @@ interface RuntimeProvenance {
     readonly planner: PlannerMode;
     readonly replayRuns: number;
     readonly screenshotModelInput: boolean;
+    readonly targetSource: TargetSource;
     readonly syntheticTarget: boolean;
   };
 }
@@ -275,6 +297,31 @@ function headless(args: ParsedArguments, env: Readonly<NodeJS.ProcessEnv>): bool
   return parseBoolean(env.HANDRAIL_HEADLESS, true);
 }
 
+export function resolveScreenshotModelInput(
+  mode: PlannerMode,
+  includeScreenshotFlag: boolean,
+  configuredValue: string | undefined,
+): boolean {
+  if (mode === "scripted") return false;
+  return includeScreenshotFlag ? true : parseBoolean(configuredValue, false);
+}
+
+function screenshotModelInput(
+  mode: PlannerMode,
+  args: ParsedArguments,
+  env: Readonly<NodeJS.ProcessEnv>,
+): boolean {
+  return resolveScreenshotModelInput(
+    mode,
+    flag(args, "include-screenshot"),
+    env.HANDRAIL_INCLUDE_SCREENSHOT,
+  );
+}
+
+export function resolveTargetSource(suppliedTarget: string | undefined): TargetSource {
+  return suppliedTarget === undefined ? "bundled-fixture" : "external";
+}
+
 function plannerMode(args: ParsedArguments): PlannerMode {
   const value = option(args, "planner") ?? "live";
   if (value !== "scripted" && value !== "live") {
@@ -362,12 +409,27 @@ async function runtimeProvenance(
   mode: PlannerMode,
   target: ManagedTarget,
   replayRuns: number,
+  includeScreenshot: boolean,
 ): Promise<RuntimeProvenance> {
   const sourceRevision = option(args, "source-revision") ?? "working-tree";
   if (sourceRevision !== "working-tree" && !/^[a-f0-9]{40}$/u.test(sourceRevision)) {
     throw new Error(
       "--source-revision must be a lowercase 40-character Git commit or working-tree.",
     );
+  }
+  if (sourceRevision !== "working-tree") {
+    const head = (await execFile("git", ["rev-parse", "HEAD"], { cwd: io.cwd })).stdout.trim();
+    if (head !== sourceRevision) {
+      throw new Error("--source-revision must equal the current checked-out Git commit.");
+    }
+    const dirtySource = (
+      await execFile("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", "src"], {
+        cwd: io.cwd,
+      })
+    ).stdout.trim();
+    if (dirtySource) {
+      throw new Error("Revision-bound evidence requires a clean committed src tree.");
+    }
   }
   return {
     sourceRevision,
@@ -379,8 +441,9 @@ async function runtimeProvenance(
       command: mode === "live" ? "demo:live" : "demo:offline",
       planner: mode,
       replayRuns,
-      screenshotModelInput: flag(args, "include-screenshot"),
-      syntheticTarget: target.synthetic,
+      screenshotModelInput: includeScreenshot,
+      targetSource: target.source,
+      syntheticTarget: target.source === "bundled-fixture",
     },
   };
 }
@@ -410,7 +473,6 @@ function operatorCommand(
 
 function demoOperatorAuthorizer(
   binding: ReturnType<typeof createDemoBinding>,
-  targetUrl: string,
 ): OperatorActionAuthorizer {
   const base = createDemoPolicyStack(binding);
   const operatorPolicy = {
@@ -432,7 +494,7 @@ function demoOperatorAuthorizer(
   };
   return (context) => {
     const decision = checkPolicy(operatorPolicy, {
-      url: targetUrl,
+      url: context.currentUrl,
       command: operatorCommand(context.action),
       effect: context.effect,
       actor: "operator",
@@ -456,14 +518,11 @@ function demoOperatorAuthorizer(
 
 function createPlanner(
   mode: PlannerMode,
-  args: ParsedArguments,
   env: Readonly<NodeJS.ProcessEnv>,
+  includeScreenshot: boolean,
 ): DiscoveryPlanner {
   if (mode === "scripted") return new ScriptedPlanner();
   const provider = env.HANDRAIL_PLANNER_PROVIDER ?? "ollama";
-  const includeScreenshot = flag(args, "include-screenshot")
-    ? true
-    : parseBoolean(env.HANDRAIL_INCLUDE_SCREENSHOT, false);
   const timeoutMs = Number(env.HANDRAIL_MODEL_TIMEOUT_MS ?? "45000");
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 10 * 60_000) {
     throw new Error("HANDRAIL_MODEL_TIMEOUT_MS must be between 1000 and 600000.");
@@ -477,6 +536,7 @@ function createPlanner(
         "http://127.0.0.1:11434",
       model: env.HANDRAIL_MODEL ?? env.OLLAMA_MODEL ?? "qwen3:4b",
       includeScreenshot,
+      allowRemoteDataEgress: parseBoolean(env.HANDRAIL_ALLOW_REMOTE_MODEL_EGRESS, false),
       timeoutMs,
     });
   }
@@ -499,16 +559,29 @@ function createPlanner(
   throw new Error("HANDRAIL_PLANNER_PROVIDER must be ollama or openai-compatible.");
 }
 
-async function resolvedModelEvidence(
-  provenance: CapabilityArtifact["provenance"],
+export async function resolvedModelEvidence(
+  provenance: ModelIdentity,
   env: Readonly<NodeJS.ProcessEnv>,
-): Promise<ModelEvidence> {
-  const base: ModelEvidence = {
+  transport: PlannerTransport,
+  requireNativeOllamaDigest = false,
+): Promise<ResolvedModelEvidence> {
+  const base: ResolvedModelEvidence = {
     provider: provenance.provider,
     modelId: provenance.modelId,
     liveModel: provenance.liveModel,
   };
-  if (provenance.provider !== "ollama-local") return base;
+  const unavailable = (cause?: unknown): ResolvedModelEvidence => {
+    if (requireNativeOllamaDigest) {
+      throw new Error(
+        "Live Ollama evidence requires the selected model's 64-character SHA-256 digest from /api/tags.",
+        cause === undefined ? undefined : { cause },
+      );
+    }
+    return base;
+  };
+  if (transport !== "native-ollama" || provenance.provider !== "ollama-local") {
+    return requireNativeOllamaDigest ? unavailable() : base;
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3_000);
   try {
@@ -518,19 +591,88 @@ async function resolvedModelEvidence(
       env.OLLAMA_HOST ??
       "http://127.0.0.1:11434"
     ).replace(/\/$/u, "");
-    const response = await fetch(`${origin}/api/tags`, { signal: controller.signal });
-    if (!response.ok) return base;
+    const response = await fetch(`${origin}/api/tags`, {
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (!response.ok) return unavailable();
     const payload = (await response.json()) as {
       models?: Array<{ name?: string; model?: string; digest?: string }>;
     };
     const match = payload.models?.find(
       (item) => item.name === provenance.modelId || item.model === provenance.modelId,
     );
-    return match?.digest ? { ...base, digest: match.digest } : base;
-  } catch {
-    return base;
+    return match?.digest && /^[a-f0-9]{64}$/u.test(match.digest)
+      ? { ...base, digest: match.digest }
+      : unavailable();
+  } catch (error) {
+    return unavailable(error);
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+export function assertStableModelEvidence(
+  before: ResolvedModelEvidence,
+  after: ResolvedModelEvidence,
+): ResolvedModelEvidence {
+  if (
+    before.provider !== after.provider ||
+    before.modelId !== after.modelId ||
+    before.liveModel !== after.liveModel ||
+    before.digest !== after.digest
+  ) {
+    throw new Error(
+      "The selected model identity or immutable digest changed while discovery was running.",
+    );
+  }
+  return after;
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
+  );
+}
+
+async function assertApprovalPathAbsent(approvalPath: string): Promise<void> {
+  try {
+    await readFile(approvalPath);
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    throw error;
+  }
+  throw new Error(
+    "Live demo approval must be issued after this discovery run; the configured approval path already exists.",
+  );
+}
+
+export async function waitForExternalArtifactApproval(
+  artifact: CapabilityArtifact,
+  approvalPath: string,
+  timeoutMs: number,
+  now: () => Date = () => new Date(),
+): Promise<ArtifactApproval> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      const approval = ArtifactApprovalSchema.parse(
+        JSON.parse(await readFile(approvalPath, "utf8")) as unknown,
+      );
+      assertArtifactApproval(artifact, approval, now());
+      return approval;
+    } catch (error) {
+      if (!isMissingFile(error)) throw error;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for independently issued artifact approval at ${approvalPath}.`,
+      );
+    }
+    await delay(Math.min(250, Math.max(1, deadline - Date.now())));
   }
 }
 
@@ -586,6 +728,7 @@ async function managedTarget(args: ParsedArguments, defaultPort = 0): Promise<Ma
     return {
       origin: url.origin,
       entryUrl: url.toString(),
+      source: resolveTargetSource(supplied),
       synthetic: flag(args, "screenshots-safe"),
       close: async () => undefined,
     };
@@ -595,6 +738,7 @@ async function managedTarget(args: ParsedArguments, defaultPort = 0): Promise<Ma
   return {
     origin: target.origin,
     entryUrl: target.entryUrl(scenario(args)),
+    source: resolveTargetSource(undefined),
     synthetic: true,
     close: target.close,
   };
@@ -609,7 +753,7 @@ function projectedOutputs(
       const specification = specifications?.[name];
       // Undeclared outputs fail closed. Valid successful runs always have a matching spec.
       const classification = specification?.classification ?? "secret";
-      return [name, redactValue(classified(value, classification))];
+      return [name, redactValue(classified(value, classification), { redactInternal: true })];
     }),
   );
 }
@@ -732,6 +876,7 @@ function manifestRun(
   summary: EvidenceRef,
   events: EvidenceRef,
   screenshotRefs: readonly EvidenceRef[],
+  generatedArtifact?: EvidenceRef,
 ): RunEvidence {
   const directory = `runs/${id}`;
   const relative = (ref: EvidenceRef) => path.posix.join(directory, ref.relativePath);
@@ -755,6 +900,22 @@ function manifestRun(
     summarySha256: summary.sha256,
     events: relative(events),
     eventsSha256: events.sha256,
+    ...(generatedArtifact
+      ? (() => {
+          if (
+            kind !== "discovery" ||
+            generatedArtifact.kind !== "artifact" ||
+            generatedArtifact.relativePath !== "artifact.json" ||
+            generatedArtifact.mimeType !== "application/json"
+          ) {
+            throw new TypeError("Discovery manifest artifact evidence is not canonical.");
+          }
+          return {
+            artifact: relative(generatedArtifact),
+            artifactSha256: generatedArtifact.sha256,
+          };
+        })()
+      : {}),
     screenshots,
   };
 }
@@ -792,7 +953,8 @@ async function runDiscovery(args: ParsedArguments, io: CliIo, mode: PlannerMode)
   let handoffInterrupted = false;
   try {
     const binding = createDemoBinding(target.origin);
-    const planner = createPlanner(mode, args, io.env);
+    const includeScreenshot = screenshotModelInput(mode, args, io.env);
+    const planner = createPlanner(mode, io.env, includeScreenshot);
     const writer = new CliEvidenceWriter({ rootDirectory: output });
     const baseRequest = createDemoDiscoveryRequest(binding, target.entryUrl, {
       goal: discoveryGoal(args),
@@ -809,7 +971,7 @@ async function runDiscovery(args: ParsedArguments, io: CliIo, mode: PlannerMode)
         control,
         surface,
         port: integerOption(args, "operator-port", 4313, 0, 65_535),
-        authorizeOperatorAction: demoOperatorAuthorizer(binding, target.entryUrl),
+        authorizeOperatorAction: demoOperatorAuthorizer(binding),
         auditSink: (event) => writer.appendEvent(event),
         ...(target.synthetic
           ? {
@@ -840,6 +1002,7 @@ async function runDiscovery(args: ParsedArguments, io: CliIo, mode: PlannerMode)
                 stoppedBecause: context.summary,
                 session: context.session,
                 automationGrant: context.automationGrant,
+                preQuiescedEpoch: context.intervention.ownerEpoch,
                 automationId: context.runId,
                 evaluateCheckpoint: async ({ session, observation }) => {
                   const blocked = /Your session has expired/iu.test(observation.visibleText);
@@ -900,9 +1063,14 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
   );
   const artifact = JSON.parse(await readFile(artifactPath, "utf8")) as unknown;
   const artifactApprovalPath = option(args, "artifact-approval");
-  const artifactApproval = artifactApprovalPath
-    ? (JSON.parse(await readFile(path.resolve(io.cwd, artifactApprovalPath), "utf8")) as unknown)
-    : undefined;
+  if (!artifactApprovalPath) {
+    throw new Error(
+      "Replay requires --artifact-approval with a current approval bound to the artifact ID, revision, and digest.",
+    );
+  }
+  const artifactApproval = ArtifactApprovalSchema.parse(
+    JSON.parse(await readFile(path.resolve(io.cwd, artifactApprovalPath), "utf8")) as unknown,
+  );
   const parsedArtifact = CapabilityArtifactSchema.safeParse(artifact);
   const summaryArtifact = parsedArtifact.success ? parsedArtifact.data : undefined;
   const target = await managedTarget(args);
@@ -920,7 +1088,7 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
         control,
         surface,
         port: integerOption(args, "operator-port", 4313, 0, 65_535),
-        authorizeOperatorAction: demoOperatorAuthorizer(binding, target.entryUrl),
+        authorizeOperatorAction: demoOperatorAuthorizer(binding),
         auditSink: (event) => writer.appendEvent(event),
         ...(target.synthetic
           ? {
@@ -945,7 +1113,7 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
       evidence: writer,
       screenshotRedactionVerified: target.synthetic,
       surfaceSentinels: DEMO_REPLAY_SENTINELS,
-      artifactApprovalMode: artifactApproval === undefined ? "non_strict" : "strict",
+      artifactApprovalMode: "strict",
       ...(operator
         ? {
             onIntervention: async (context) => {
@@ -1024,7 +1192,7 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
       inputs: { memberId: option(args, "member-id") ?? "26017" },
       targetUrl: target.entryUrl,
       runId: id,
-      ...(artifactApproval === undefined ? {} : { artifactApproval }),
+      artifactApproval,
     });
     if (handoffInterrupted) return 0;
     await writeReplaySummary(
@@ -1059,6 +1227,37 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
       target,
     );
   }
+}
+
+async function runApprove(args: ParsedArguments, io: CliIo): Promise<number> {
+  const artifactPath = option(args, "artifact");
+  if (!artifactPath) throw new Error("Approval requires --artifact PATH.");
+  const reviewer = option(args, "reviewer")?.trim();
+  if (!reviewer) throw new Error("Approval requires --reviewer ID.");
+  if (!flag(args, "confirm-reviewed")) {
+    throw new Error(
+      "Approval requires --confirm-reviewed after an independent reviewer inspects the exact artifact content.",
+    );
+  }
+  const artifact = assertValidArtifact(
+    JSON.parse(await readFile(path.resolve(io.cwd, artifactPath), "utf8")) as unknown,
+  );
+  const approval = ArtifactApprovalSchema.parse({
+    artifactId: artifact.id,
+    revision: artifact.revision,
+    digest: artifact.digest,
+    approvedBy: reviewer,
+    approvedAt: io.now().toISOString(),
+  });
+  const output = absoluteOutput(
+    args,
+    io,
+    path.join("work", `approval-${artifact.id}-r${artifact.revision}`),
+  );
+  const writer = new CliEvidenceWriter({ rootDirectory: output, now: io.now });
+  const ref = await writer.writeJson("artifact-approval.json", approval, "artifact");
+  io.stdout(`${JSON.stringify({ output, approval, evidence: ref }, null, 2)}\n`);
+  return 0;
 }
 
 async function replayForDemo(
@@ -1102,17 +1301,54 @@ async function replayForDemo(
 async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Promise<number> {
   const base = runBase(args, io, mode === "live" ? "demo-live" : "demo-scripted");
   const output = absoluteOutput(args, io, path.join("work", base));
+  const configuredApprovalPath = option(args, "artifact-approval");
+  if (mode === "live" && !configuredApprovalPath) {
+    throw new Error(
+      "Live demo requires --artifact-approval PATH for an approval issued after reviewing this run's discovered artifact.",
+    );
+  }
+  const externalApprovalPath = configuredApprovalPath
+    ? path.resolve(io.cwd, configuredApprovalPath)
+    : undefined;
+  if (mode === "live" && externalApprovalPath) {
+    const relativeApprovalPath = path.relative(output, externalApprovalPath);
+    if (
+      relativeApprovalPath === "" ||
+      (!relativeApprovalPath.startsWith(`..${path.sep}`) && relativeApprovalPath !== "..")
+    ) {
+      throw new Error("Live demo approval must be written outside the evidence bundle directory.");
+    }
+    await assertApprovalPathAbsent(externalApprovalPath);
+  }
+  const approvalTimeoutMs = integerOption(
+    args,
+    "approval-timeout-ms",
+    15 * 60_000,
+    1_000,
+    60 * 60_000,
+  );
   const target = await managedTarget(args);
   const control = new ControlCoordinator();
   const surface = await BrowserSurface.launch({ control, headless: headless(args, io.env) });
   try {
     const binding = createDemoBinding(target.origin);
+    const includeScreenshot = screenshotModelInput(mode, args, io.env);
+    const planner = createPlanner(mode, io.env, includeScreenshot);
+    const modelIdentity: ModelIdentity = {
+      provider: planner.provider,
+      modelId: planner.model,
+      liveModel: planner.live,
+    };
+    const modelBeforeDiscovery =
+      mode === "live"
+        ? await resolvedModelEvidence(modelIdentity, io.env, planner.transport, true)
+        : undefined;
     const discoveryId = `${base}-discovery`;
     const discoveryDirectory = path.join(output, "runs", discoveryId);
     const discoveryWriter = new CliEvidenceWriter({ rootDirectory: discoveryDirectory });
     const discovery = await new DiscoveryEngine({
       surface,
-      planner: createPlanner(mode, args, io.env),
+      planner,
       control,
       policy: createDemoPolicyStack(binding),
       evidence: discoveryWriter,
@@ -1126,10 +1362,24 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
           : {}),
       }),
     );
+    const stableLiveModel = modelBeforeDiscovery
+      ? assertStableModelEvidence(
+          modelBeforeDiscovery,
+          await resolvedModelEvidence(modelIdentity, io.env, planner.transport, true),
+        )
+      : undefined;
     const discoveryRefs = await writeDiscoverySummary(discoveryWriter, discovery);
     if (discovery.status !== "succeeded") {
       io.stdout(`${JSON.stringify({ output, discovery: discoverySummary(discovery) }, null, 2)}\n`);
       return exitForResult(discovery);
+    }
+    if (
+      stableLiveModel &&
+      (stableLiveModel.provider !== discovery.artifact.provenance.provider ||
+        stableLiveModel.modelId !== discovery.artifact.provenance.modelId ||
+        stableLiveModel.liveModel !== discovery.artifact.provenance.liveModel)
+    ) {
+      throw new Error("Discovery artifact model provenance does not match the pinned live model.");
     }
 
     const rootWriter = new CliEvidenceWriter({ rootDirectory: output });
@@ -1138,13 +1388,38 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
       discovery.artifact,
       "artifact",
     );
-    const artifactApproval: ArtifactApproval = {
-      artifactId: discovery.artifact.id,
-      revision: discovery.artifact.revision,
-      digest: discovery.artifact.digest,
-      approvedBy: "local-evaluator",
-      approvedAt: io.now().toISOString(),
-    };
+    const artifactApproval: ArtifactApproval =
+      mode === "live"
+        ? await (async () => {
+            if (!externalApprovalPath) {
+              throw new Error("Live demo approval path is unavailable.");
+            }
+            io.stdout(
+              `${JSON.stringify({
+                status: "awaiting_approval",
+                output,
+                artifact: path.join(output, artifactRef.relativePath),
+                artifactId: discovery.artifact.id,
+                artifactRevision: discovery.artifact.revision,
+                artifactDigest: discovery.artifact.digest,
+                approvalPath: externalApprovalPath,
+                approvalTimeoutMs,
+              })}\n`,
+            );
+            return waitForExternalArtifactApproval(
+              discovery.artifact,
+              externalApprovalPath,
+              approvalTimeoutMs,
+              io.now,
+            );
+          })()
+        : {
+            artifactId: discovery.artifact.id,
+            revision: discovery.artifact.revision,
+            digest: discovery.artifact.digest,
+            approvedBy: "offline-fixture-auto-approval",
+            approvedAt: io.now().toISOString(),
+          };
     const artifactApprovalRef = await rootWriter.writeJson(
       "artifacts/member.balance.lookup.v1.approval.json",
       artifactApproval,
@@ -1180,6 +1455,12 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
       surface,
       control,
     );
+    const discoveryArtifactEvidence = discovery.evidence.find(
+      (ref) => ref.kind === "artifact" && ref.relativePath === "artifact.json",
+    );
+    if (!discoveryArtifactEvidence) {
+      throw new Error("Discovery did not persist its canonical artifact evidence.");
+    }
     const runs: RunEvidence[] = [
       manifestRun(
         output,
@@ -1189,6 +1470,7 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
         discoveryRefs.summary,
         discoveryRefs.events,
         screenshotRefs(discovery.evidence),
+        discoveryArtifactEvidence,
       ),
       ...replaySuccesses.map((run) => run.evidence),
       replayException.evidence,
@@ -1203,14 +1485,27 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
       })),
     );
     const stabilityRef = await rootWriter.writeJson("stability.json", stability);
-    const model = await resolvedModelEvidence(discovery.artifact.provenance, io.env);
-    const provenance = await runtimeProvenance(args, io, mode, target, replayCount);
+    const model: ModelEvidence = {
+      ...(stableLiveModel ??
+        (await resolvedModelEvidence(discovery.artifact.provenance, io.env, planner.transport))),
+      transport: planner.transport,
+    };
+    const provenance = await runtimeProvenance(
+      args,
+      io,
+      mode,
+      target,
+      replayCount,
+      includeScreenshot,
+    );
     await rootWriter.writeSanitizedText(
       "README.md",
       [
         "# Handrail evidence bundle",
         "",
-        "Generated by the public demo command against the repository's synthetic legacy UI.",
+        target.source === "bundled-fixture"
+          ? "Generated by the public demo command against the repository's synthetic legacy UI."
+          : "Generated by the public demo command against a caller-supplied target.",
         `The discovery run is model-driven; ${replayCount} stability replay run${replayCount === 1 ? "" : "s"} execute the compiled artifact with zero model calls.`,
         "The exceptional replay demonstrates the declared MEMBER_NOT_FOUND business outcome.",
       ].join("\n"),
@@ -1407,10 +1702,7 @@ async function serve(args: ParsedArguments, io: CliIo): Promise<number> {
     control,
     surface,
     port: integerOption(args, "operator-port", 4313, 0, 65_535),
-    authorizeOperatorAction: demoOperatorAuthorizer(
-      createDemoBinding(target.origin),
-      target.entryUrl(scenario(args)),
-    ),
+    authorizeOperatorAction: demoOperatorAuthorizer(createDemoBinding(target.origin)),
   });
   try {
     if (scenario(args) === "session-expired") {
@@ -1495,7 +1787,44 @@ async function serve(args: ParsedArguments, io: CliIo): Promise<number> {
 
 function help(io: CliIo): number {
   io.stdout(
-    `Handrail - discover once, replay deterministically\n\nUsage:\n  npm run catalog -- --json\n  npm run demo:offline -- --replays 10 --output work/demo\n  npm run demo:live -- --replays 10 --output work/demo-live\n  npm run discover -- --planner live --goal "Look up the synthetic member savings balance" --target http://127.0.0.1:4312/legacy --output work/discovery-live\n  npm run replay -- --artifact evidence/artifacts/member.balance.lookup.v1.json\n  npm run replay -- --artifact evidence/artifacts/member.balance.lookup.v1.json --scenario session-expired --handoff\n  npm run serve -- --scenario session-expired --port 4312 --operator-port 4313\n\nCore options:\n  --artifact PATH           Capability artifact to replay\n  --artifact-approval PATH  Enable strict replay with a digest-bound approval record\n  --goal TEXT               Natural-language discovery goal (1-500 characters)\n  --target URL              HTTP(S) /legacy target; omitted starts the synthetic target\n  --planner scripted|live   Live defaults to native Ollama\n  --run-id ID               Stable caller-supplied run ID\n  --output DIRECTORY        Exact evidence directory\n  --source-revision COMMIT  Bind evidence to a 40-character Git revision\n  --member-id VALUE         Synthetic invocation input\n  --replays COUNT           Successful deterministic replays in demo (1-50)\n  --handoff                 Open a same-session operator console during replay\n  --headed                  Show Chromium\n  --include-screenshot      Send screenshots to a configured vision model\n\nLive environment:\n  HANDRAIL_PLANNER_PROVIDER=ollama|openai-compatible\n  HANDRAIL_OLLAMA_BASE_URL or OLLAMA_BASE_URL (default http://127.0.0.1:11434)\n  HANDRAIL_MODEL or OLLAMA_MODEL (default qwen3:4b)\n  HANDRAIL_ALLOW_REMOTE_MODEL_EGRESS=false (required for non-loopback compatible endpoints)\n  LLM_BASE_URL, LLM_API_KEY, LLM_MODEL (openai-compatible only)\n`,
+    `${[
+      "Handrail - discover once, replay deterministically",
+      "",
+      "Usage:",
+      "  npm run approve -- --artifact PATH --reviewer ID --confirm-reviewed --output work/approval",
+      "  npm run catalog -- --json",
+      "  npm run demo:offline -- --replays 10 --output work/demo",
+      "  npm run demo:live -- --replays 10 --artifact-approval work/live-approval/artifact-approval.json --output work/demo-live",
+      '  npm run discover -- --planner live --goal "Look up the synthetic member savings balance" --target http://127.0.0.1:4312/legacy --output work/discovery-live',
+      "  npm run replay -- --artifact evidence/artifacts/member.balance.lookup.v1.json --artifact-approval evidence/artifacts/member.balance.lookup.v1.approval.json",
+      "  npm run replay -- --artifact evidence/artifacts/member.balance.lookup.v1.json --artifact-approval evidence/artifacts/member.balance.lookup.v1.approval.json --scenario session-expired --handoff",
+      "  npm run serve -- --scenario session-expired --port 4312 --operator-port 4313",
+      "",
+      "Core options:",
+      "  --artifact PATH           Capability artifact to replay",
+      "  --artifact-approval PATH  Required digest-bound approval for replay/live-demo continuation",
+      "  --approval-timeout-ms MS   Live-demo approval wait (1000-3600000; default 900000)",
+      "  --reviewer ID             Human reviewer identity for approve",
+      "  --confirm-reviewed        Confirm exact artifact content was reviewed",
+      "  --goal TEXT               Natural-language discovery goal (1-500 characters)",
+      "  --target URL              HTTP(S) /legacy target; omitted starts the synthetic target",
+      "  --planner scripted|live   Live defaults to native Ollama",
+      "  --run-id ID               Stable caller-supplied run ID",
+      "  --output DIRECTORY        Exact evidence directory",
+      "  --source-revision COMMIT  Bind evidence to a 40-character Git revision",
+      "  --member-id VALUE         Synthetic invocation input",
+      "  --replays COUNT           Successful deterministic replays in demo (1-50)",
+      "  --handoff                 Open a same-session operator console during replay",
+      "  --headed                  Show Chromium",
+      "  --include-screenshot      Send screenshots to a configured vision model",
+      "",
+      "Live environment:",
+      "  HANDRAIL_PLANNER_PROVIDER=ollama|openai-compatible",
+      "  HANDRAIL_OLLAMA_BASE_URL or OLLAMA_BASE_URL (default http://127.0.0.1:11434)",
+      "  HANDRAIL_MODEL or OLLAMA_MODEL (default qwen3:4b)",
+      "  HANDRAIL_ALLOW_REMOTE_MODEL_EGRESS=false (HTTPS required off loopback)",
+      "  LLM_BASE_URL, LLM_API_KEY, LLM_MODEL (openai-compatible only)",
+    ].join("\n")}\n`,
   );
   return 0;
 }
@@ -1507,6 +1836,8 @@ export async function runCli(argv: readonly string[], io: CliIo = defaultIo): Pr
     throw new Error(`Unexpected positional argument ${args.positionals[0]}.`);
   }
   switch (args.command) {
+    case "approve":
+      return runApprove(args, io);
     case "catalog":
       return catalog(io, flag(args, "json"));
     case "demo":

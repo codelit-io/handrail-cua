@@ -8,7 +8,14 @@ import type {
   TargetSpec,
   ValueExpression,
 } from "../src/domain/schema.js";
-import type { DiscoveryPlanner, PlannerRequest, PlannerResponse } from "../src/model/planner.js";
+import {
+  computePromptRequestHash,
+  computePromptTraceHashFromRequestHashes,
+  type DiscoveryPlanner,
+  PlannerDecisionError,
+  type PlannerRequest,
+  type PlannerResponse,
+} from "../src/model/planner.js";
 import { ControlCoordinator } from "../src/runtime/control.js";
 import { DiscoveryEngine, type DiscoveryRequest } from "../src/runtime/discovery.js";
 import type { PolicyStack } from "../src/runtime/policy.js";
@@ -123,7 +130,12 @@ class FakeSurface implements SurfaceAdapter {
   currentObservation: SurfaceObservation | undefined;
 
   constructor(
-    readonly options: { businessOutcome?: boolean; transientFirstObservation?: boolean } = {},
+    readonly options: {
+      businessOutcome?: boolean;
+      transientFirstObservation?: boolean;
+      unclassifiedButton?: boolean;
+      observationOrigin?: string;
+    } = {},
   ) {}
 
   async createSession(): Promise<SurfaceSession> {
@@ -143,6 +155,9 @@ class FakeSurface implements SurfaceAdapter {
       }),
       observed("find", "button", "Find Member"),
     ];
+    if (this.options.unclassifiedButton) {
+      elements.push(observed("delete", "button", "Delete Account"));
+    }
     if (this.stage >= 2) {
       elements.push(
         observed("balance", "cell", "$1,284.37", {
@@ -169,6 +184,7 @@ class FakeSurface implements SurfaceAdapter {
     this.currentObservation = {
       id: `observation-${this.observeCount}`,
       sessionId: this.session.id,
+      url: `${this.options.observationOrigin ?? binding.origin}/legacy`,
       route: "/legacy",
       title: "Synthetic Member Services",
       capturedAt: "2026-08-27T18:00:00.000Z",
@@ -303,8 +319,10 @@ class FakeSurface implements SurfaceAdapter {
 class ObservationPlanner implements DiscoveryPlanner {
   readonly provider = "test-observation-provider";
   readonly model = "test-observation-model";
+  readonly transport = "scripted" as const;
   readonly live = false;
   #callCount = 0;
+  readonly #promptRequestHashes: string[] = [];
   readonly observationIds: string[] = [];
   readonly allowedActionSets: ModelDecision["kind"][][] = [];
 
@@ -312,7 +330,23 @@ class ObservationPlanner implements DiscoveryPlanner {
     return this.#callCount;
   }
 
+  get promptHash(): string {
+    return computePromptTraceHashFromRequestHashes(this.transport, this.#promptRequestHashes);
+  }
+
+  promptHashSince(callCount: number): string {
+    return computePromptTraceHashFromRequestHashes(
+      this.transport,
+      this.#promptRequestHashes.slice(callCount),
+    );
+  }
+
   async decide(request: PlannerRequest): Promise<PlannerResponse> {
+    const promptRequestHash = computePromptRequestHash(
+      this.transport,
+      JSON.stringify({ model: this.model, request }),
+    );
+    this.#promptRequestHashes.push(promptRequestHash);
     this.#callCount += 1;
     this.observationIds.push(request.observation.id);
     this.allowedActionSets.push([...request.allowedActions]);
@@ -350,15 +384,17 @@ class ObservationPlanner implements DiscoveryPlanner {
       decision = { ...common, kind: "activate", elementRef: button.ref };
     }
     assert.ok(request.allowedActions.includes(decision.kind));
-    return { decision, provider: this.provider, model: this.model };
+    return { decision, provider: this.provider, model: this.model, promptRequestHash };
   }
 }
 
 class FixedPlanner implements DiscoveryPlanner {
   readonly provider = "fixed-test-provider";
   readonly model = "fixed-test-model";
+  readonly transport = "scripted" as const;
   readonly live = false;
   #callCount = 0;
+  readonly #promptRequestHashes: string[] = [];
 
   constructor(readonly choose: (request: PlannerRequest, callCount: number) => ModelDecision) {}
 
@@ -366,12 +402,29 @@ class FixedPlanner implements DiscoveryPlanner {
     return this.#callCount;
   }
 
+  get promptHash(): string {
+    return computePromptTraceHashFromRequestHashes(this.transport, this.#promptRequestHashes);
+  }
+
+  promptHashSince(callCount: number): string {
+    return computePromptTraceHashFromRequestHashes(
+      this.transport,
+      this.#promptRequestHashes.slice(callCount),
+    );
+  }
+
   async decide(request: PlannerRequest): Promise<PlannerResponse> {
+    const promptRequestHash = computePromptRequestHash(
+      this.transport,
+      JSON.stringify({ model: this.model, request }),
+    );
+    this.#promptRequestHashes.push(promptRequestHash);
     this.#callCount += 1;
     return {
       decision: this.choose(request, this.#callCount),
       provider: this.provider,
       model: this.model,
+      promptRequestHash,
     };
   }
 }
@@ -488,6 +541,66 @@ describe("bounded model-driven discovery", () => {
     assert.equal(planner.callCount, 0);
   });
 
+  it("rejects a contract pattern outside the bounded fixed-width language before opening a surface", async () => {
+    const surface = new FakeSurface();
+    const planner = new ObservationPlanner();
+    const unsafe = request({ inputs: { memberId: `${"a".repeat(24)}!` } });
+    const memberId = unsafe.artifact.inputs.memberId;
+    assert.ok(memberId?.validator.kind === "string");
+    memberId.validator.pattern = "^(a+)+$";
+    memberId.validator.maxLength = 25;
+
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control: new ControlCoordinator(),
+      policy,
+    }).discover(unsafe);
+
+    assert.equal(result.status, "failed");
+    if (result.status !== "failed") return;
+    assert.equal(result.sessionId, null);
+    assert.equal(result.error.code, "INPUT_INVALID");
+    assert.equal(result.error.phase, "preflight");
+    assert.equal(surface.observeCount, 0);
+    assert.equal(planner.callCount, 0);
+  });
+
+  it("forbids replay target overrides during discovery before opening a surface", async () => {
+    const surface = new FakeSurface();
+    const planner = new ObservationPlanner();
+    const overrideTarget = durableTarget(
+      observed("override", "button", "Find Member"),
+      "Synthetic replay-only override",
+    );
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control: new ControlCoordinator(),
+      policy,
+    }).discover(
+      request({
+        binding: {
+          ...binding,
+          targetOverrides: { lookupButton: overrideTarget },
+          targetOverrideReviews: {
+            lookupButton: {
+              baseTargetDigest: "a".repeat(64),
+              overrideTargetDigest: "b".repeat(64),
+              reviewedBy: "reviewer-01",
+              reviewedAt: "2026-08-27T17:00:00.000Z",
+            },
+          },
+        },
+      }),
+    );
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.phase, "preflight");
+    assert.equal(surface.observeCount, 0);
+    assert.equal(planner.callCount, 0);
+  });
+
   it("acts only on fresh observed refs and compiles the verified live path into an artifact", async () => {
     const surface = new FakeSurface();
     const planner = new ObservationPlanner();
@@ -507,6 +620,10 @@ describe("bounded model-driven discovery", () => {
       "observation-4",
     ]);
     assert.deepEqual(planner.allowedActionSets.at(-1), ["finish", "request_help"]);
+    assert.equal(
+      planner.allowedActionSets.some((actions) => actions.includes("activate_coordinate")),
+      false,
+    );
     assert.equal(surface.dispatchCount, 3);
     assert.equal(surface.closed, true);
     assert.equal(result.artifact.schemaVersion, "1.0.0");
@@ -532,6 +649,42 @@ describe("bounded model-driven discovery", () => {
     );
   });
 
+  it("reports model calls for each run when a planner instance is reused", async () => {
+    const planner = new ObservationPlanner();
+    const [first, second] = await Promise.all([
+      new DiscoveryEngine({
+        surface: new FakeSurface(),
+        planner,
+        control: new ControlCoordinator(),
+        policy,
+      }).discover(request({ runId: "discovery-planner-reuse-1" })),
+      new DiscoveryEngine({
+        surface: new FakeSurface(),
+        planner,
+        control: new ControlCoordinator(),
+        policy,
+      }).discover(request({ runId: "discovery-planner-reuse-2" })),
+    ]);
+
+    assert.equal(first.status, "succeeded");
+    assert.equal(first.modelCalls, 4);
+    assert.equal(second.status, "succeeded");
+    assert.equal(second.modelCalls, 4);
+    assert.equal(planner.callCount, 8);
+    if (first.status === "succeeded" && second.status === "succeeded") {
+      assert.equal(
+        first.artifact.provenance.promptHash,
+        second.artifact.provenance.promptHash,
+        "identical per-run request sequences should have the same prompt trace despite interleaving",
+      );
+      assert.notEqual(
+        first.artifact.provenance.promptHash,
+        planner.promptHash,
+        "an artifact must not inherit the shared planner's interleaved lifetime trace",
+      );
+    }
+  });
+
   it("rejects a stale model observation before dispatch", async () => {
     const surface = new FakeSurface();
     const planner = new FixedPlanner((plannerRequest) => ({
@@ -550,6 +703,106 @@ describe("bounded model-driven discovery", () => {
 
     assert.equal(result.status, "failed");
     if (result.status === "failed") assert.equal(result.error.code, "MODEL_INVALID_DECISION");
+    assert.equal(surface.dispatchCount, 0);
+  });
+
+  it("never offers or accepts coordinate activation from a model", async () => {
+    const surface = new FakeSurface();
+    let offeredActions: readonly ModelDecision["kind"][] = [];
+    const planner = new FixedPlanner((plannerRequest) => {
+      offeredActions = [...plannerRequest.allowedActions];
+      return {
+        kind: "activate_coordinate",
+        decisionId: "decision-coordinate",
+        observationId: plannerRequest.observation.id,
+        x: 0.2,
+        y: 0.2,
+        rationale: "Attempt a raw coordinate activation.",
+      };
+    });
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control: new ControlCoordinator(),
+      policy,
+    }).discover(request());
+
+    assert.equal(offeredActions.includes("activate_coordinate"), false);
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.code, "MODEL_INVALID_DECISION");
+      assert.match(result.error.message, /coordinate activation is forbidden/u);
+    }
+    assert.equal(surface.dispatchCount, 0);
+  });
+
+  it("classifies typed planner contract failures as invalid decisions, not outages", async () => {
+    const surface = new FakeSurface();
+    const planner: DiscoveryPlanner = {
+      provider: "typed-error-provider",
+      model: "typed-error-model",
+      transport: "openai-compatible",
+      live: true,
+      callCount: 1,
+      promptHash: computePromptTraceHashFromRequestHashes("openai-compatible", []),
+      promptHashSince: () => computePromptTraceHashFromRequestHashes("openai-compatible", []),
+      decide: async () => {
+        throw new PlannerDecisionError("The provider returned a stale observation.");
+      },
+    };
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control: new ControlCoordinator(),
+      policy,
+    }).discover(request());
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.code, "MODEL_INVALID_DECISION");
+      assert.equal(result.error.retryable, false);
+    }
+    assert.equal(surface.dispatchCount, 0);
+  });
+
+  it("evaluates policy against the fresh observed origin instead of reconstructing it", async () => {
+    const secondaryOrigin = "http://127.0.0.1:4314";
+    const surface = new FakeSurface({ observationOrigin: secondaryOrigin });
+    let offeredActions: readonly ModelDecision["kind"][] = [];
+    const planner = new FixedPlanner((plannerRequest) => {
+      offeredActions = [...plannerRequest.allowedActions];
+      return {
+        kind: "set_value",
+        decisionId: "decision-secondary-origin",
+        observationId: plannerRequest.observation.id,
+        elementRef: "field",
+        value: { kind: "input", name: "memberId" },
+        rationale: "Attempt an action after cross-origin drift.",
+      };
+    });
+    const bindingWithSecondaryOrigin: AppBinding = {
+      ...binding,
+      policy: {
+        ...binding.policy,
+        allowedOrigins: [binding.origin, secondaryOrigin],
+      },
+    };
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control: new ControlCoordinator(),
+      policy: {
+        ...policy,
+        binding: {
+          ...policy.binding,
+          allowedOrigins: [binding.origin, secondaryOrigin],
+        },
+      },
+    }).discover(request({ binding: bindingWithSecondaryOrigin }));
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "MODEL_INVALID_DECISION");
+    assert.equal(offeredActions.includes("set_value"), false);
     assert.equal(surface.dispatchCount, 0);
   });
 
@@ -638,6 +891,76 @@ describe("bounded model-driven discovery", () => {
     assert.ok(control.snapshot(surface.session.id).epoch > previousEpoch);
   });
 
+  it("revokes the returned automation lease when the handoff checkpoint fails", async () => {
+    const surface = new FakeSurface();
+    const control = new ControlCoordinator();
+    const planner = new FixedPlanner((plannerRequest) => ({
+      kind: "request_help",
+      decisionId: "decision-failed-handoff",
+      observationId: plannerRequest.observation.id,
+      reason: "expired_session",
+      summary: "Restore the synthetic session.",
+      rationale: "Exercise failed same-session handoff cleanup.",
+    }));
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control,
+      policy,
+      onIntervention: async (context) => {
+        const operatorGrant = control.claimOperator(context.session.id, "operator-test");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        return {
+          sessionId: context.session.id,
+          automationGrant,
+          observation: await surface.observe(),
+          checkpoint: { passed: false, observed: "Synthetic recovery did not pass." },
+        };
+      },
+    }).discover(request());
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "POSTCONDITION_FAILED");
+    assert.equal(control.snapshot(surface.session.id).phase, "FAILED");
+    assert.equal(control.snapshot(surface.session.id).owner, null);
+  });
+
+  it("revokes a valid returned lease when handoff metadata names a replacement session", async () => {
+    const surface = new FakeSurface();
+    const control = new ControlCoordinator();
+    const planner = new FixedPlanner((plannerRequest) => ({
+      kind: "request_help",
+      decisionId: "decision-wrong-session-handoff",
+      observationId: plannerRequest.observation.id,
+      reason: "expired_session",
+      summary: "Restore the synthetic session.",
+      rationale: "Exercise invalid handoff metadata cleanup.",
+    }));
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control,
+      policy,
+      onIntervention: async (context) => {
+        const operatorGrant = control.claimOperator(context.session.id, "operator-test");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        return {
+          sessionId: "replacement-session",
+          automationGrant,
+          observation: await surface.observe(),
+          checkpoint: { passed: true, observed: "Synthetic session restored." },
+        };
+      },
+    }).discover(request());
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "CONTROL_LOST");
+    assert.equal(control.snapshot(surface.session.id).phase, "FAILED");
+    assert.equal(control.snapshot(surface.session.id).owner, null);
+  });
+
   it("blocks an activation that has no explicit effect and idempotency classification", async () => {
     const surface = new FakeSurface();
     const planner = new FixedPlanner((plannerRequest) => ({
@@ -660,6 +983,27 @@ describe("bounded model-driven discovery", () => {
 
     assert.equal(result.status, "failed");
     if (result.status === "failed") assert.equal(result.error.code, "MODEL_INVALID_DECISION");
+    assert.equal(surface.dispatchCount, 0);
+  });
+
+  it("does not let a classified sibling expose an unclassified activation", async () => {
+    const surface = new FakeSurface({ unclassifiedButton: true });
+    const planner = new FixedPlanner((plannerRequest) => ({
+      kind: "activate",
+      decisionId: "decision-unclassified-sibling",
+      observationId: plannerRequest.observation.id,
+      elementRef: "delete",
+      rationale: "Attempt the unreviewed sibling control.",
+    }));
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control: new ControlCoordinator(),
+      policy,
+    }).discover(request());
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "POLICY_DENIED");
     assert.equal(surface.dispatchCount, 0);
   });
 

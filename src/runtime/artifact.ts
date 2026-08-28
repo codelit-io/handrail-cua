@@ -20,6 +20,8 @@ import {
   TargetSpecSchema,
   type ValueExpression,
 } from "../domain/schema.js";
+import { compileConstrainedPattern, constrainedPatternPasses } from "./constrained-pattern.js";
+import { findSensitivePatterns } from "./redaction.js";
 
 export type ArtifactLintCode =
   | "SCHEMA_INVALID"
@@ -218,6 +220,12 @@ export function assertArtifactApproval(
     );
   }
   const approvedAt = new Date(approval.approvedAt).getTime();
+  const artifactCreatedAt = new Date(artifact.provenance.createdAt).getTime();
+  if (approvedAt < artifactCreatedAt) {
+    throw new ArtifactApprovalError(
+      "Artifact approval predates the immutable artifact it claims to approve.",
+    );
+  }
   if (approvedAt > now.getTime()) {
     throw new ArtifactApprovalError("Artifact approval time is in the future.");
   }
@@ -231,6 +239,15 @@ export function assertArtifactApproval(
     }
   }
   return deepFreeze(approval, new WeakSet<object>());
+}
+
+/** Domain-separated identity for the exact trusted artifact approval record. */
+export function computeArtifactApprovalDigest(input: unknown): string {
+  const approval = ArtifactApprovalSchema.parse(input);
+  return createHash("sha256")
+    .update("handrail-artifact-approval-v1\0")
+    .update(canonicalStringify(approval))
+    .digest("hex");
 }
 
 /** Domain-separated digest for one reviewed target specification. */
@@ -412,40 +429,8 @@ function candidateIsWeak(candidate: TargetCandidate): boolean {
   return false;
 }
 
-function containsPaymentCard(value: string): boolean {
-  const digits = value.replace(/[ -]/gu, "");
-  if (!/^\d{13,19}$/u.test(digits)) {
-    return false;
-  }
-  let sum = 0;
-  let doubleDigit = false;
-  for (let index = digits.length - 1; index >= 0; index -= 1) {
-    const character = digits[index];
-    if (character === undefined) {
-      return false;
-    }
-    let digit = Number(character);
-    if (doubleDigit) {
-      digit *= 2;
-      if (digit > 9) {
-        digit -= 9;
-      }
-    }
-    sum += digit;
-    doubleDigit = !doubleDigit;
-  }
-  return sum % 10 === 0;
-}
-
 function looksSensitiveString(value: string): boolean {
-  return (
-    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u.test(value) ||
-    /\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/iu.test(value) ||
-    /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}\b/u.test(value) ||
-    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu.test(value) ||
-    /\b\d{3}-\d{2}-\d{4}\b/u.test(value) ||
-    containsPaymentCard(value)
-  );
+  return findSensitivePatterns(value).length > 0;
 }
 
 function lintSensitiveStrings(value: unknown, path: string, issues: ArtifactLintIssue[]): void {
@@ -469,7 +454,18 @@ function lintSensitiveStrings(value: unknown, path: string, issues: ArtifactLint
   }
   if (isPlainRecord(value)) {
     for (const [key, member] of Object.entries(value)) {
-      lintSensitiveStrings(member, `${path}.${key}`, issues);
+      const keyIsSensitive = looksSensitiveString(key);
+      const memberPath = keyIsSensitive ? `${path}.[sensitive-key]` : `${path}.${key}`;
+      if (keyIsSensitive) {
+        issues.push(
+          issue(
+            "SENSITIVE_LITERAL",
+            memberPath,
+            "Sensitive-looking object keys must be replaced by stable non-sensitive identifiers.",
+          ),
+        );
+      }
+      lintSensitiveStrings(member, memberPath, issues);
     }
   }
 }
@@ -571,17 +567,13 @@ function lintPredicate(
       );
     }
     if (atom.kind === "target_text_matches" && atom.matcher.mode === "regex") {
-      try {
-        new RegExp(atom.matcher.value, atom.matcher.caseSensitive ? "u" : "iu");
-      } catch {
-        issues.push(
-          issue(
-            "INVALID_REGEX",
-            `${atomPath}.matcher.value`,
-            "Text matcher is not a valid regular expression.",
-          ),
-        );
-      }
+      issues.push(
+        issue(
+          "INVALID_REGEX",
+          `${atomPath}.matcher.mode`,
+          "Artifact text predicates support exact or contains matching only.",
+        ),
+      );
     }
   }
 }
@@ -712,6 +704,26 @@ function lintParsedArtifact(artifact: CapabilityArtifactDraft): ArtifactLintIssu
   const issues: ArtifactLintIssue[] = [];
   lintSensitiveStrings(artifact, "$", issues);
   lintTargets(artifact, issues);
+
+  for (const [direction, specs] of [
+    ["inputs", artifact.contract.inputs],
+    ["outputs", artifact.contract.outputs],
+  ] as const) {
+    for (const [name, spec] of Object.entries(specs)) {
+      if (spec.validator.kind !== "string" || spec.validator.pattern === undefined) continue;
+      try {
+        compileConstrainedPattern(spec.validator.pattern, spec.validator.maxLength ?? 0);
+      } catch (error) {
+        issues.push(
+          issue(
+            "INVALID_REGEX",
+            `$.contract.${direction}.${name}.validator.pattern`,
+            error instanceof Error ? error.message : "Pattern is outside the constrained language.",
+          ),
+        );
+      }
+    }
+  }
 
   const stepIndexById = new Map<string, number>();
   for (const [index, step] of artifact.steps.entries()) {
@@ -981,17 +993,17 @@ function validateWithSpec(
       );
     }
     if (validator.pattern !== undefined) {
-      let pattern: RegExp;
+      let passed = false;
       try {
-        pattern = new RegExp(validator.pattern, "u");
+        passed = constrainedPatternPasses(validator.pattern, value, validator.maxLength ?? 0);
       } catch {
         throw new ArtifactBindingError(
           errorCode,
           path,
-          "Contract validator contains an invalid pattern.",
+          "Contract validator contains a pattern outside the constrained language.",
         );
       }
-      if (!pattern.test(value)) {
+      if (!passed) {
         throw new ArtifactBindingError(
           errorCode,
           path,

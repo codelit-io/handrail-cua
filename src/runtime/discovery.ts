@@ -724,6 +724,7 @@ export class DiscoveryEngine {
       }
 
       const allowedActions = this.#allowedActions(run, request);
+      const allowedElementRefs = this.#allowedElementRefs(run, request);
       let response: PlannerResponse;
       run.modelCalls += 1;
       try {
@@ -736,6 +737,7 @@ export class DiscoveryEngine {
           outputSpecs: request.artifact.outputs,
           observation: run.observation,
           allowedActions,
+          allowedElementRefs,
         });
       } catch (error) {
         throw this.#fault(
@@ -838,6 +840,53 @@ export class DiscoveryEngine {
     ) {
       throw new Error("The planner referenced an element absent from the current observation.");
     }
+    if (
+      "elementRef" in decision &&
+      (decision.kind === "set_value" ||
+        decision.kind === "activate" ||
+        decision.kind === "extract") &&
+      !this.#allowedElementRefs(run, request)[decision.kind].includes(decision.elementRef)
+    ) {
+      throw new Error(`The planner referenced an element not authorized for ${decision.kind}.`);
+    }
+  }
+
+  #allowedElementRefs(
+    run: MutableRun,
+    request: DiscoveryRequest,
+  ): Readonly<Record<"set_value" | "activate" | "extract", readonly string[]>> {
+    const url = run.observation.url;
+    return {
+      set_value: run.observation.elements
+        .filter(
+          (element) =>
+            element.enabled &&
+            element.interactive &&
+            (element.inputType !== undefined ||
+              element.role === "textbox" ||
+              element.role === "combobox" ||
+              element.role === "searchbox" ||
+              element.role === "spinbutton"),
+        )
+        .map((element) => element.ref),
+      activate: run.observation.elements
+        .filter((element) => {
+          if (!element.enabled || !element.interactive) return false;
+          const activation = activationPolicyFor(element, request.artifact);
+          if (!activation) return false;
+          return checkPolicy(this.#policy, {
+            url,
+            command: "activate",
+            effect: activation.effect,
+            actor: "discovery",
+            runId: run.runId,
+            sessionId: run.sessionId,
+            ownerEpoch: run.grant.epoch,
+          }).allowed;
+        })
+        .map((element) => element.ref),
+      extract: run.observation.elements.map((element) => element.ref),
+    };
   }
 
   #allowedActions(run: MutableRun, request: DiscoveryRequest): DiscoveryModelAction[] {

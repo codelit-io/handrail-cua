@@ -326,6 +326,7 @@ class ObservationPlanner implements DiscoveryPlanner {
   readonly observationIds: string[] = [];
   readonly allowedActionSets: ModelDecision["kind"][][] = [];
   readonly boundInputSets: string[][] = [];
+  readonly allowedElementRefSets: PlannerRequest["allowedElementRefs"][] = [];
 
   get callCount(): number {
     return this.#callCount;
@@ -352,6 +353,7 @@ class ObservationPlanner implements DiscoveryPlanner {
     this.observationIds.push(request.observation.id);
     this.allowedActionSets.push([...request.allowedActions]);
     this.boundInputSets.push([...(request.boundInputs ?? [])]);
+    this.allowedElementRefSets.push(request.allowedElementRefs);
     const common = {
       decisionId: `decision-${this.#callCount}`,
       observationId: request.observation.id,
@@ -624,6 +626,8 @@ describe("bounded model-driven discovery", () => {
     assert.deepEqual(planner.allowedActionSets.at(-1), ["finish", "request_help"]);
     assert.deepEqual(planner.boundInputSets, [[], ["memberId"], ["memberId"], ["memberId"]]);
     assert.equal(planner.allowedActionSets[1]?.includes("set_value"), false);
+    assert.deepEqual(planner.allowedElementRefSets[1]?.activate, ["find"]);
+    assert.equal(planner.allowedElementRefSets[1]?.activate?.includes("member-input"), false);
     assert.equal(
       planner.allowedActionSets.some((actions) => actions.includes("activate_coordinate")),
       false,
@@ -1007,7 +1011,7 @@ describe("bounded model-driven discovery", () => {
     }).discover(request());
 
     assert.equal(result.status, "failed");
-    if (result.status === "failed") assert.equal(result.error.code, "POLICY_DENIED");
+    if (result.status === "failed") assert.equal(result.error.code, "MODEL_INVALID_DECISION");
     assert.equal(surface.dispatchCount, 0);
   });
 

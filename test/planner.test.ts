@@ -433,6 +433,11 @@ describe("planner request provenance", () => {
     const request = plannerRequest();
     request.allowedActions = ["set_value", "request_help"];
     request.boundInputs = ["memberId"];
+    request.allowedElementRefs = {
+      set_value: ["member-input"],
+      activate: [],
+      extract: ["balance-cell"],
+    };
     const exact = await captureOpenAiRequest(request, { includeScreenshot: false });
     const parsed = JSON.parse(exact.body) as {
       messages: Array<{ content: string | Array<{ type: string; text?: string }> }>;

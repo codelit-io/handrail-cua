@@ -137,7 +137,10 @@ export interface ReplayEngineOptions {
   readonly screenshotRedactionVerified?: boolean;
   readonly resolveSecret?: (name: string) => ScalarValue;
   readonly now?: () => Date;
+  /** Monotonic clock used only for the active automation timeout budget. */
+  readonly monotonicNow?: () => number;
   readonly sleep?: (durationMs: number) => Promise<void>;
+  /** Excludes time spent inside an explicit operator handoff. */
   readonly runTimeoutMs?: number;
   readonly closeSessionOnFinish?: boolean;
   readonly surfaceSentinels?: readonly ReplaySurfaceSentinel[];
@@ -190,6 +193,8 @@ interface ExecutionState {
   latestObservation: SurfaceObservation;
   actionSequence: number;
   handledInterventions: number;
+  readonly automationBudgetStartedAtMs: number;
+  operatorHandoffDurationMs: number;
   currentStepId?: string;
 }
 
@@ -612,6 +617,7 @@ export class ReplayEngine {
   readonly #screenshotRedactionVerified: boolean;
   readonly #resolveSecret?: ReplayEngineOptions["resolveSecret"];
   readonly #now: () => Date;
+  readonly #monotonicNow: () => number;
   readonly #sleep: (durationMs: number) => Promise<void>;
   readonly #runTimeoutMs: number;
   readonly #closeSessionOnFinish: boolean;
@@ -630,6 +636,7 @@ export class ReplayEngine {
     this.#screenshotRedactionVerified = options.screenshotRedactionVerified ?? false;
     this.#resolveSecret = options.resolveSecret;
     this.#now = options.now ?? (() => new Date());
+    this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#sleep =
       options.sleep ??
       ((durationMs) => new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
@@ -715,6 +722,7 @@ export class ReplayEngine {
       });
       await this.#surface.navigate(sessionId, entryUrl, grant);
       const observation = await this.#surface.observe(sessionId);
+      const automationBudgetStartedAtMs = this.#monotonicNow();
       state = {
         runId,
         artifact,
@@ -734,19 +742,14 @@ export class ReplayEngine {
         latestObservation: observation,
         actionSequence: 0,
         handledInterventions: 0,
+        automationBudgetStartedAtMs,
+        operatorHandoffDurationMs: 0,
       };
 
       this.#assertSurfaceCompatible(artifact, binding.expectedFingerprint, observation);
 
-      const deadline = Date.now() + this.#runTimeoutMs;
       for (const step of artifact.steps) {
-        if (Date.now() > deadline) {
-          throw new ReplayStepError({
-            code: "RUN_TIMEOUT",
-            message: "Replay exceeded its configured run deadline.",
-            retryable: false,
-          });
-        }
+        this.#assertWithinRunBudget(state);
         state.currentStepId = step.id;
         const outcome = await this.#executeStepWithHandoff(step, state);
         if (outcome) {
@@ -775,6 +778,7 @@ export class ReplayEngine {
         }
       }
 
+      this.#assertWithinRunBudget(state);
       const knownOutcome = await this.#knownOutcome(state);
       if (knownOutcome) {
         const evidence = await this.#checkpointEvidence(state, `outcome-${knownOutcome.code}`);
@@ -1015,6 +1019,7 @@ export class ReplayEngine {
         throw error;
       }
       await this.#handleIntervention(state, normalizedError);
+      this.#assertWithinRunBudget(state);
       return this.#executeStep(step, state);
     }
   }
@@ -1025,17 +1030,25 @@ export class ReplayEngine {
     }
     const previousGrant = state.grant;
     const previousObservationId = state.latestObservation.id;
-    const resolution = await this.#onIntervention({
-      runId: state.runId,
-      artifactId: state.artifact.id,
-      session: state.session,
-      currentStepId: state.currentStepId,
-      reason: error.interventionReason ?? "STUCK",
-      summary: error.message,
-      observedState: error.observed ?? "Replay reached a typed intervention boundary.",
-      automationGrant: previousGrant,
-      observation: state.latestObservation,
-    });
+    const handoffStartedAtMs = this.#monotonicNow();
+    let handoffDurationMs = 0;
+    let resolution: ReplayInterventionResolution;
+    try {
+      resolution = await this.#onIntervention({
+        runId: state.runId,
+        artifactId: state.artifact.id,
+        session: state.session,
+        currentStepId: state.currentStepId,
+        reason: error.interventionReason ?? "STUCK",
+        summary: error.message,
+        observedState: error.observed ?? "Replay reached a typed intervention boundary.",
+        automationGrant: previousGrant,
+        observation: state.latestObservation,
+      });
+    } finally {
+      handoffDurationMs = Math.max(0, this.#monotonicNow() - handoffStartedAtMs);
+      state.operatorHandoffDurationMs += handoffDurationMs;
+    }
 
     if (resolution.automationGrant.sessionId === state.sessionId) {
       try {
@@ -1121,8 +1134,25 @@ export class ReplayEngine {
       newOwnerEpoch: resolution.automationGrant.epoch,
       observationId: resolution.observation.id,
       checkpointPassed: resolution.checkpoint.passed,
+      operatorHandoffDurationMs: handoffDurationMs,
       modelCalls: ZERO_MODEL_CALLS,
     });
+  }
+
+  #assertWithinRunBudget(state: ExecutionState): void {
+    const activeAutomationDurationMs = Math.max(
+      0,
+      this.#monotonicNow() - state.automationBudgetStartedAtMs - state.operatorHandoffDurationMs,
+    );
+    if (activeAutomationDurationMs > this.#runTimeoutMs) {
+      throw new ReplayStepError({
+        code: "RUN_TIMEOUT",
+        message: "Replay exceeded its configured active automation deadline.",
+        retryable: false,
+        expected: `active automation duration <= ${this.#runTimeoutMs}ms`,
+        observed: `active automation duration ${Math.round(activeAutomationDurationMs)}ms`,
+      });
+    }
   }
 
   async #executeStep(

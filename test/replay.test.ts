@@ -849,6 +849,93 @@ describe("deterministic capability replay", () => {
     assert.equal(RunResultSchema.safeParse(result).success, true);
   });
 
+  it("excludes explicit operator handoff time from the active automation timeout", async () => {
+    const surface = new FakeReplaySurface("always");
+    const control = new ControlCoordinator();
+    let monotonicTimeMs = 0;
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      monotonicNow: () => monotonicTimeMs,
+      sleep: async () => undefined,
+      runTimeoutMs: 100,
+      onIntervention: async (context) => {
+        control.requestPause(context.automationGrant, "Operator recovery requested");
+        await control.quiesceAutomation(context.automationGrant);
+        const operatorGrant = control.claimOperator(context.session.id, "operator-replay-test");
+        monotonicTimeMs += 10_000;
+        Reflect.set(surface, "buttonFault", "none");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        return {
+          sessionId: context.session.id,
+          automationGrant,
+          observation: await surface.observe(context.session.id),
+          checkpoint: { passed: true, observed: "Operator restored the synthetic surface." },
+        };
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-operator-time-excluded",
+    });
+
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(surface.dispatchCommands, ["set_value", "activate"]);
+  });
+
+  it("still enforces active automation time immediately after an operator handoff", async () => {
+    const surface = new FakeReplaySurface("always");
+    const control = new ControlCoordinator();
+    let handoffReturned = false;
+    let postHandoffClockReads = 0;
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      monotonicNow: () => {
+        if (!handoffReturned) return 0;
+        postHandoffClockReads += 1;
+        return postHandoffClockReads === 1 ? 10_000 : 10_101;
+      },
+      sleep: async () => undefined,
+      runTimeoutMs: 100,
+      onIntervention: async (context) => {
+        control.requestPause(context.automationGrant, "Operator recovery requested");
+        await control.quiesceAutomation(context.automationGrant);
+        const operatorGrant = control.claimOperator(context.session.id, "operator-replay-test");
+        Reflect.set(surface, "buttonFault", "none");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        handoffReturned = true;
+        return {
+          sessionId: context.session.id,
+          automationGrant,
+          observation: await surface.observe(context.session.id),
+          checkpoint: { passed: true, observed: "Operator restored the synthetic surface." },
+        };
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-active-time-enforced",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.code, "RUN_TIMEOUT");
+      assert.equal(result.error.observed, "active automation duration 101ms");
+    }
+    assert.deepEqual(surface.dispatchCommands, ["set_value"]);
+  });
+
   it("fails and revokes the current automation grant when resume validation fails", async () => {
     const surface = new FakeReplaySurface("always");
     const control = new ControlCoordinator();

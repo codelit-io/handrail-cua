@@ -184,3 +184,7 @@ Do not release or describe the assignment as complete if any of these is true:
 - A screenshot has not been manually reviewed for sensitive content.
 - Any action workflow is tag-pinned instead of SHA-pinned, or CI has write permissions.
 - Anonymous clean-clone setup or the public CI run has not been verified. A local pass alone is not release evidence.
+
+## Public release verification
+
+The public repository is [codelit-io/handrail-cua](https://github.com/codelit-io/handrail-cua). The release candidate passed [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185) and a credential-free HTTPS clone that repeated `npm ci`, Chromium installation, all 111 tests, the 44-file/12-run evidence validator, and the offline end-to-end demo. The [v0.1.0 release](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) is the authoritative record for the final documentation commit and its final CI run.

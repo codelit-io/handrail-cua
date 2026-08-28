@@ -1,5 +1,7 @@
 # Handrail
 
+[![CI](https://github.com/codelit-io/handrail-cua/actions/workflows/ci.yml/badge.svg)](https://github.com/codelit-io/handrail-cua/actions/workflows/ci.yml)
+
 Handrail is a compact computer-use automation runtime that discovers a workflow once, compiles the verified interaction into a reviewable capability artifact, and replays that artifact deterministically without a model.
 
 The included vertical slice operates an explicitly synthetic legacy member-services UI. It demonstrates real browser interaction, bounded LLM-driven discovery, typed artifact compilation, zero-model replay, and exclusive same-session human handoff. It is a take-home system design and implementation, not a deployed banking service.

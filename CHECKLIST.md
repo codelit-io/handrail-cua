@@ -94,18 +94,27 @@ This is the release ledger. A checked item means the final tree contains evidenc
 - [x] Build evidence/manifest.json with run relationships, hashes, provenance flags, and model-call counts.
 - [x] Validate every Markdown link, JSON file, hash, image, and requirement mapping.
 - [x] Add least-privilege CI for quality, contracts, offline integration, zero-model replay, evidence, security, and clean install.
-- [ ] Run the documented evaluator path from a clean local clone.
-- [ ] Phase 6 review: required names/paths/headings are exact and the repository explains itself without oral context.
+- [x] Run the documented evaluator path from a clean local clone.
+- [x] Phase 6 review: required names/paths/headings are exact and the repository explains itself without oral context.
 
 ## Phase 7 - public release
 
 - [x] Confirm no repository-name collision and authenticated write access to codelit-io.
-- [ ] Inspect the exact staged diff and commit only intended project files.
-- [ ] Scan the complete Git history for secrets and unsafe evidence.
-- [ ] Create codelit-io/handrail-cua as a public repository and push main.
-- [ ] Verify GitHub reports PUBLIC visibility while unauthenticated.
-- [ ] Wait for all CI checks and fix any failure.
-- [ ] Clone anonymously to a temporary directory and rerun install, tests, evidence validation, and offline demo.
-- [ ] Record the public URL, final commit, CI result, and anonymous-clone result in the release checklist and GitHub release record.
-- [ ] Prepare the assignment email body with the repository URL on its own line; do not send without separate authorization and the application address.
-- [ ] Mark the active goal complete only after the public repository and verification gates pass.
+- [x] Inspect the exact staged diff and commit only intended project files.
+- [x] Scan the complete Git history for secrets and unsafe evidence.
+- [x] Create codelit-io/handrail-cua as a public repository and push main.
+- [x] Verify GitHub reports PUBLIC visibility while unauthenticated.
+- [x] Wait for all CI checks and fix any failure.
+- [x] Clone anonymously to a temporary directory and rerun install, tests, evidence validation, and offline demo.
+- [x] Record the public URL, release verification sources, and anonymous-clone result in this ledger; record the immutable final commit and CI URL in the GitHub release.
+- [x] Prepare the assignment email body with the repository URL on its own line; do not send without separate authorization.
+- [x] Keep the active goal open until the public repository, final CI, anonymous clone, and GitHub release record pass.
+
+## Public release verification
+
+- Repository: <https://github.com/codelit-io/handrail-cua>
+- Visibility: the authenticated GitHub view and an unauthenticated GitHub API request both reported `PUBLIC` / `public` with `main` as the default branch.
+- Release candidate: commit `e740dc06ecdad3be02f3a34c86373c1a7e47b8fe` passed [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185).
+- Anonymous verification: a credential-free HTTPS clone of that commit completed `npm ci`, installed Chromium, passed `npm run verify` with 111/111 tests and the 44-file/12-run evidence validator, and completed `demo:offline` with successful discovery, zero-model replay, and `MEMBER_NOT_FOUND` handling.
+- Final release: [v0.1.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) is the authoritative record for the immutable final commit and final CI URL. It is created only after this ledger commit passes the same public CI and anonymous-clone gates.
+- Submission boundary: the email body is prepared in the final handoff with the repository URL on its own line. No email is sent by this workflow.

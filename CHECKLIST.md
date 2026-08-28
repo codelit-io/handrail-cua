@@ -1,6 +1,6 @@
 # Handrail execution checklist
 
-This is the release ledger. A checked item means the stated phase produced traceable implementation or evidence. Historical v0.1 publication checks are labeled separately; they do not attest the active v0.2 candidate. Current stop-ship gates stay unchecked until verified against the new public commit.
+This is the release ledger. A checked item means the stated phase produced traceable implementation or evidence. Historical v0.1 publication checks are labeled separately; they do not attest v0.2. The v0.2 stop-ship gates below were closed against the public repository, public CI, and a credential-free clone.
 
 ## Phase 0 - requirements and design
 
@@ -121,12 +121,15 @@ This is the release ledger. A checked item means the stated phase produced trace
 - [x] Complete and attach a same-session handoff run with two distinct manifest-bound captures, epochs 1 -> 3 -> 4, 11 operator audit events, a fresh passing checkpoint, and zero model calls.
 - [x] Re-run desktop handoff against the exact source; re-inspect the source-unchanged 1440 x 900 and 390 x 844 references, keyboard/accessibility behavior, console listeners, and all 8 unique release images.
 - [x] Run lint, typecheck, 226/226 tests, strict evidence validation, both zero-vulnerability dependency audits, targeted tracked-file hygiene checks, and a fresh 10/10 offline evaluator path.
-- [ ] Push the reviewed public revision, wait for green CI, and publish the v0.2.0 release record.
-- [ ] Clone the public revision anonymously and repeat installation, verification, evidence validation, and the offline demo.
+- [x] Push the reviewed public revision, wait for green CI, merge it through PR #1, and publish the v0.2.0 release record.
+- [x] Clone public `main` without GitHub credentials and repeat locked installation, Chromium setup, 226/226 tests, strict evidence validation, and the 10/10 offline demo.
 
 ## Public release verification
 
 - Repository: <https://github.com/codelit-io/handrail-cua>
 - Historical v0.1 baseline: commit `e740dc06ecdad3be02f3a34c86373c1a7e47b8fe`, [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185), and [v0.1.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) attest the prior public tree only.
-- v0.2 candidate: record the immutable commit, manifest v1.2 validation summary, CI URL, release URL, visibility check, and anonymous-clone result here only after Phase 8 passes.
+- Reviewed v0.2 candidate: `131567b61f86c5ffd83ef839c31764e441bb1073`, merged without squashing through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1) as `175dc614d3d89def523f3ffbc1755748540df127` so the evidence source revision remains in public history.
+- Public verification: [GitHub Actions run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed on the merged tree, and GitHub reported repository visibility `PUBLIC`.
+- Anonymous verification: a credential-free HTTPS clone of public `main` resolved to `175dc614d3d89def523f3ffbc1755748540df127`; `npm ci`, Chromium setup, `npm run verify`, all 226 tests, and strict validation of 50 files/13 runs passed. A newly generated scripted smoke then completed 10/10 fresh-session replays with zero replay model calls and the expected zero-model `MEMBER_NOT_FOUND` outcome.
+- Release record: [v0.2.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) is the immutable public submission record; its metadata names the final tagged revision and verification sources without creating a self-referential commit hash in this file.
 - Submission boundary: the email body is prepared in the final handoff with the repository URL on its own line. No email is sent by this workflow.

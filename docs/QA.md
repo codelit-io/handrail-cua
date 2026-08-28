@@ -191,6 +191,10 @@ Do not release or describe the assignment as complete if any of these is true:
 - Any action workflow is tag-pinned instead of SHA-pinned, or CI has write permissions.
 - Anonymous clean-clone setup or the public CI run has not been verified. A local pass alone is not release evidence.
 
-## Historical public release baseline
+## Public release verification
 
-The public repository is [codelit-io/handrail-cua](https://github.com/codelit-io/handrail-cua). [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185) and the [v0.1.0 release](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) remain historical evidence for the prior baseline only. They do not attest the v0.2.0 hardening changes, manifest v1.2 bundle, or final candidate. The new release commit, CI run, exact test/evidence counts, anonymous-clone result, and tag must be recorded only after those gates complete.
+The public repository is [codelit-io/handrail-cua](https://github.com/codelit-io/handrail-cua). Reviewed candidate `131567b61f86c5ffd83ef839c31764e441bb1073` was merged without squashing through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1) as `175dc614d3d89def523f3ffbc1755748540df127`. [GitHub Actions run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed on that public merge, and GitHub reported the repository as `PUBLIC`.
+
+A separate HTTPS clone with GitHub tokens unset and credential lookup disabled resolved public `main` to the same merge. From that clone, `npm ci`, `npx playwright install chromium`, and `npm run verify` passed: 226/226 tests, real-Chromium E2E, and strict validation of the committed 50-file/13-run manifest. A newly generated offline smoke completed 10/10 fresh-session replays with zero replay model calls; its separate exception replay returned `business_outcome / MEMBER_NOT_FOUND` with zero model calls. [v0.2.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) records the final immutable tag and release verification sources.
+
+[GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185) and [v0.1.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) remain historical evidence for the prior baseline only.

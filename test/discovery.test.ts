@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import type {
@@ -18,6 +21,7 @@ import {
 } from "../src/model/planner.js";
 import { ControlCoordinator } from "../src/runtime/control.js";
 import { DiscoveryEngine, type DiscoveryRequest } from "../src/runtime/discovery.js";
+import { EvidenceWriter } from "../src/runtime/evidence.js";
 import type { PolicyStack } from "../src/runtime/policy.js";
 import type {
   ActionReceipt,
@@ -394,6 +398,16 @@ class ObservationPlanner implements DiscoveryPlanner {
   }
 }
 
+class RepeatedDecisionIdPlanner extends ObservationPlanner {
+  override async decide(request: PlannerRequest): Promise<PlannerResponse> {
+    const response = await super.decide(request);
+    return {
+      ...response,
+      decision: { ...response.decision, decisionId: "d1" } as ModelDecision,
+    };
+  }
+}
+
 class FixedPlanner implements DiscoveryPlanner {
   readonly provider = "fixed-test-provider";
   readonly model = "fixed-test-model";
@@ -697,6 +711,37 @@ describe("bounded model-driven discovery", () => {
       !JSON.stringify(result.artifact).includes("$1,284.37"),
       "The changing output value must never become a persisted locator.",
     );
+  });
+
+  it("assigns trusted run-local IDs when a planner repeats untrusted decision labels", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "handrail-discovery-decisions-"));
+    try {
+      const result = await new DiscoveryEngine({
+        surface: new FakeSurface(),
+        planner: new RepeatedDecisionIdPlanner(),
+        control: new ControlCoordinator(),
+        policy,
+        evidence: new EvidenceWriter({ rootDirectory: root }),
+      }).discover(request({ runId: "discovery-repeated-decision-labels" }));
+
+      assert.equal(result.status, "succeeded");
+      const events = (await readFile(path.join(root, "events.redacted.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const decisionIds = events
+        .filter((event) => event.type === "model.decision")
+        .map((event) => (event.decision as Record<string, unknown>).decisionId);
+      assert.deepEqual(decisionIds, [
+        "decision-0001",
+        "decision-0002",
+        "decision-0003",
+        "decision-0004",
+      ]);
+      assert.equal(new Set(decisionIds).size, decisionIds.length);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("reports model calls for each run when a planner instance is reused", async () => {

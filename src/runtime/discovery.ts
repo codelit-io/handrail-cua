@@ -820,8 +820,15 @@ export class DiscoveryEngine {
             "The planner response provenance does not match its configured identity or request hash contract.",
           );
         }
-        decision = ModelDecisionSchema.parse(response.decision);
-        this.#assertFreshDecision(run, decision, allowedActions, request);
+        const plannerDecision = ModelDecisionSchema.parse(response.decision);
+        this.#assertFreshDecision(run, plannerDecision, allowedActions, request);
+        // The model supplies workflow intent, not audit identity. Assigning the
+        // identity here prevents repeated or adversarial labels from aliasing
+        // distinct decisions in the append-only run history.
+        decision = {
+          ...plannerDecision,
+          decisionId: `decision-${String(run.modelCalls).padStart(4, "0")}`,
+        };
       } catch (error) {
         throw this.#fault(
           "MODEL_INVALID_DECISION",

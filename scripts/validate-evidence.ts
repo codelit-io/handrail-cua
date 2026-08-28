@@ -1748,7 +1748,9 @@ function assertHandoffBinding(
         ]);
         const characterCount = z.number().int().min(1).max(4_096);
         if (
-          authorizedEffect !== "reversible_write" ||
+          // Generic typing can synchronously submit or autosave, so the
+          // operator runtime intentionally classifies it as a commit.
+          authorizedEffect !== "commit" ||
           requiredOperatorDetail(runId, authorization, "characterCount", characterCount) !==
             requiredOperatorDetail(runId, completed, "characterCount", characterCount)
         ) {

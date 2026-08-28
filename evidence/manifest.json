@@ -1,0 +1,253 @@
+{
+  "schemaVersion": "1.1.0",
+  "generatedAt": "2026-08-28T03:03:21.320Z",
+  "mode": "live",
+  "model": {
+    "provider": "ollama-local",
+    "modelId": "qwen3:4b",
+    "liveModel": true,
+    "digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7"
+  },
+  "artifact": "artifacts/member.balance.lookup.v1.json",
+  "artifactSha256": "4c57584ed1ae1bdeb15533d573db027653efb7202deb9c2501d25fc157c2328f",
+  "stability": {
+    "path": "stability.json",
+    "sha256": "b0c191443df6e4864179f3fa1dceac0ed36665004d944827211a635e91335e82"
+  },
+  "runs": [
+    {
+      "id": "submission-live-qwen3-4b-discovery",
+      "kind": "discovery",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-discovery",
+      "summary": "runs/submission-live-qwen3-4b-discovery/summary.json",
+      "summarySha256": "39511c7e291db6d2952c5b3ed412e7effe4a5c39fb7aef47217bfb580767cd76",
+      "events": "runs/submission-live-qwen3-4b-discovery/events.redacted.jsonl",
+      "eventsSha256": "f48edbce8847b707e5786812b2e7eed79b17031e5af55ad67b39926466172d5b",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-discovery/screenshots/002-observation-79921cb4-2d4b-4d65-befa-89153f99ff5c.png",
+          "sha256": "23731926f19eb0fe441c901d3e7e5ec59d14643f2810a418df7362f3bde245d1",
+          "byteLength": 55071,
+          "mimeType": "image/png"
+        },
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-discovery/screenshots/005-observation-3c90ccde-d185-4fa3-b585-351423d00f48.png",
+          "sha256": "a92ae318ba9e7b5d0392025ef3e465f0280139252d25246547656ff8891968a6",
+          "byteLength": 55776,
+          "mimeType": "image/png"
+        },
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-discovery/screenshots/009-observation-e4fac4ba-2038-473c-87fc-7be5a93aa34d.png",
+          "sha256": "cdb884a7cfc5e1a2cb1543d948890e1b3c19885a31683ddf954198bdd8a9532d",
+          "byteLength": 89128,
+          "mimeType": "image/png"
+        },
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-discovery/screenshots/013-observation-d10d7b8b-c526-44ad-8691-31180de1dbd7.png",
+          "sha256": "cdb884a7cfc5e1a2cb1543d948890e1b3c19885a31683ddf954198bdd8a9532d",
+          "byteLength": 89128,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-01",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-01",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-01/summary.json",
+      "summarySha256": "83914bd11436d0fa60308c18fa9dd3f83a970ebef2ab9910fdfd115bc7df8cb6",
+      "events": "runs/submission-live-qwen3-4b-replay-success-01/events.redacted.jsonl",
+      "eventsSha256": "acef08642f799b29f1ee539d1def61119a9f9d814fe7582408276ab11cb815b7",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-01/screenshots/submission-live-qwen3-4b-replay-success-01-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-02",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-02",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-02/summary.json",
+      "summarySha256": "c4a264a10b7c216dbe402210977fea9f6440ece06755d34b2fba16e6d6bdcafa",
+      "events": "runs/submission-live-qwen3-4b-replay-success-02/events.redacted.jsonl",
+      "eventsSha256": "9fc17fc2f5577bef1f4e6a1974334c923c53117cb55a066400d43df55cb8cd45",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-02/screenshots/submission-live-qwen3-4b-replay-success-02-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-03",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-03",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-03/summary.json",
+      "summarySha256": "3ca9146bc23fdb0eb448c9ecba6b4d9310abfef450f9ff197d1eace91729a066",
+      "events": "runs/submission-live-qwen3-4b-replay-success-03/events.redacted.jsonl",
+      "eventsSha256": "c1ddfb8450b4f730127d6080d3a1333355d90f74aba66c1595c134bb561fe3e0",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-03/screenshots/submission-live-qwen3-4b-replay-success-03-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-04",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-04",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-04/summary.json",
+      "summarySha256": "1065020e34f6b1ac223be1d2f4e950aec86ae598133bdaf2ec8ea2848bb684f2",
+      "events": "runs/submission-live-qwen3-4b-replay-success-04/events.redacted.jsonl",
+      "eventsSha256": "0e3774caa051e96158188e5287cac30157f218db7325c03f4ccaf366dc1e6e68",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-04/screenshots/submission-live-qwen3-4b-replay-success-04-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-05",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-05",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-05/summary.json",
+      "summarySha256": "fce51323feb75a1f1c5df8d6f224f925295996e13d441b4874db6f61256d3389",
+      "events": "runs/submission-live-qwen3-4b-replay-success-05/events.redacted.jsonl",
+      "eventsSha256": "ce9c1a91f7289003e652d53f8fa3dad8b756d63c23ebc4ecc72e26940611b1c4",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-05/screenshots/submission-live-qwen3-4b-replay-success-05-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-06",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-06",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-06/summary.json",
+      "summarySha256": "4950419d057446e7d2e2a76afeb202142c4bdb39ed296be9f4b00a56ce01fcce",
+      "events": "runs/submission-live-qwen3-4b-replay-success-06/events.redacted.jsonl",
+      "eventsSha256": "82d673fac1110c5cb469491d02eef38cb9322a780556d1c8f88033a4d2d73188",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-06/screenshots/submission-live-qwen3-4b-replay-success-06-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-07",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-07",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-07/summary.json",
+      "summarySha256": "da6f3684fc7836cbd83de788b65f75c68aa0b003ba495b0f881dcd10765ed546",
+      "events": "runs/submission-live-qwen3-4b-replay-success-07/events.redacted.jsonl",
+      "eventsSha256": "2255f7f0798429d9cffb2690278690065acf9a48efe89a8ccc36077989874b4d",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-07/screenshots/submission-live-qwen3-4b-replay-success-07-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-08",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-08",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-08/summary.json",
+      "summarySha256": "ca8f3455cb20897a4e6fcd673e3ec7c62142c3bcab4e0110320bb2e9bac95b3d",
+      "events": "runs/submission-live-qwen3-4b-replay-success-08/events.redacted.jsonl",
+      "eventsSha256": "2b784356060bee2668a64f2afcaea1149b46594789fab77cbe633a2296285707",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-08/screenshots/submission-live-qwen3-4b-replay-success-08-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-09",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-09",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-09/summary.json",
+      "summarySha256": "950a8dd5213e49a2990320ce94e48a219aba63611f03dd3f26bddbd5b04d2444",
+      "events": "runs/submission-live-qwen3-4b-replay-success-09/events.redacted.jsonl",
+      "eventsSha256": "cfb72b40b59d0bc3beb6b42f0320580a321eb92c43ae50426890138b16a3648c",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-09/screenshots/submission-live-qwen3-4b-replay-success-09-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-success-10",
+      "kind": "replay",
+      "scenario": "success",
+      "directory": "runs/submission-live-qwen3-4b-replay-success-10",
+      "summary": "runs/submission-live-qwen3-4b-replay-success-10/summary.json",
+      "summarySha256": "f6bcb17d437f6ff87921bb86211bd1bb3e4b0f3c764e030e5ac9d4d4b22b0a2e",
+      "events": "runs/submission-live-qwen3-4b-replay-success-10/events.redacted.jsonl",
+      "eventsSha256": "cf15d73ac87b66e33060e472eacb52a19167d3a28f5b12c693afa02063b5ab38",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-success-10/screenshots/submission-live-qwen3-4b-replay-success-10-terminal-checkpoint.png",
+          "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+          "byteLength": 89299,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "submission-live-qwen3-4b-replay-not-found",
+      "kind": "replay",
+      "scenario": "exception",
+      "directory": "runs/submission-live-qwen3-4b-replay-not-found",
+      "summary": "runs/submission-live-qwen3-4b-replay-not-found/summary.json",
+      "summarySha256": "b05300c94ae7f63cb9201feb0e1d4f6c04567930dc5741452638e9791d252e67",
+      "events": "runs/submission-live-qwen3-4b-replay-not-found/events.redacted.jsonl",
+      "eventsSha256": "f8285c0d9746a259c162d092b9780f3674050b833ef3fd2aaaabf430fba68bc9",
+      "screenshots": [
+        {
+          "relativePath": "runs/submission-live-qwen3-4b-replay-not-found/screenshots/submission-live-qwen3-4b-replay-not-found-outcome-MEMBER_NOT_FOUND.png",
+          "sha256": "e6e362c5b0ab712652dbdeca093504c80f017240e632c393bbf8bf6eb30670cb",
+          "byteLength": 57181,
+          "mimeType": "image/png"
+        }
+      ]
+    }
+  ]
+}

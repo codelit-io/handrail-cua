@@ -1,0 +1,37 @@
+{
+  "name": "@codelit-io/handrail-cua",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A safe discover-once, replay-many computer-use runtime with same-session human handoff.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "catalog": "tsx src/cli.ts catalog",
+    "demo:offline": "tsx src/cli.ts demo --planner scripted",
+    "demo:live": "tsx src/cli.ts demo --planner live",
+    "discover": "tsx src/cli.ts discover",
+    "evidence:validate": "tsx scripts/validate-evidence.ts",
+    "format": "biome check --write src test scripts",
+    "lint": "biome check src test scripts",
+    "replay": "tsx src/cli.ts replay",
+    "serve": "tsx src/cli.ts serve",
+    "test": "tsx --test test/*.test.ts",
+    "test:e2e": "tsx --test test/e2e.test.ts",
+    "test:unit": "tsx --test test/artifact.test.ts test/control.test.ts test/policy.test.ts test/redaction.test.ts",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run evidence:validate"
+  },
+  "dependencies": {
+    "playwright": "1.62.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.11",
+    "@types/node": "22.20.1",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "kind": "replay",
+  "scenario": "success",
+  "result": {
+    "status": "succeeded",
+    "outputs": {
+      "savingsBalance": 8912.04
+    },
+    "checkpointEvidence": [
+      {
+        "id": "ev_a97fc0f2d7face5b236150ab",
+        "kind": "screenshot",
+        "relativePath": "screenshots/submission-live-qwen3-4b-replay-success-03-terminal-checkpoint.png",
+        "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+        "byteLength": 89299,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T03:03:06.604Z"
+      }
+    ],
+    "meta": {
+      "runId": "submission-live-qwen3-4b-replay-success-03",
+      "artifactId": "member.balance.lookup",
+      "artifactDigest": "d06ba78e8be50f9ff23bf0a5bb51ae5c05a043c9cb66bf85b4ac0c38bbc3da64",
+      "sessionId": "surface-d1e71c52-c60d-4013-9ea0-7e145b04b9f6",
+      "startedAt": "2026-08-28T03:03:04.613Z",
+      "finishedAt": "2026-08-28T03:03:06.604Z",
+      "durationMs": 1991,
+      "modelCalls": 0,
+      "ownerEpoch": 2
+    }
+  }
+}

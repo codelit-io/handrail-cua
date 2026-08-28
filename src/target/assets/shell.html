@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Northstar Core - Member Services</title>
+    <link rel="stylesheet" href="/legacy/legacy.css" />
+  </head>
+  <body class="legacy-shell">
+    <div class="synthetic-banner">SYNTHETIC DATA - TRAINING SYSTEM - NO REAL CUSTOMER RECORDS</div>
+    <table class="shell-header" role="presentation">
+      <tr>
+        <td class="product-name">Northstar Community Core</td>
+        <td class="operator">Operator: DEMO42</td>
+        <td class="branch">Branch: 0042</td>
+      </tr>
+    </table>
+    <div class="menu-bar">File &nbsp; Edit &nbsp; View &nbsp; Navigate &nbsp; Options &nbsp; Help</div>
+    <div class="tab-bar">
+      <span class="active-tab">Member Search</span><span>Accounts</span><span>Transactions</span><span>Loans</span><span>Collections</span><span>Reports</span><span>Maintenance</span>
+    </div>
+    <iframe title="Member servicing workspace" name="member-workspace"></iframe>
+    <div class="status-bar"><span>Ready</span><span>MNU001</span></div>
+    <script>
+      const shellQuery = new URLSearchParams(window.location.search);
+      const frameQuery = new URLSearchParams();
+      for (const key of ["scenario", "tenant", "member"]) {
+        const value = shellQuery.get(key);
+        if (value) frameQuery.set(key, value);
+      }
+      document.querySelector("iframe").src = `/legacy/workspace?${frameQuery.toString()}`;
+    </script>
+  </body>
+</html>

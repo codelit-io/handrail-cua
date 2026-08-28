@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Member servicing workspace</title>
+    <link rel="stylesheet" href="/legacy/legacy.css" />
+  </head>
+  <body class="workspace">
+    <table class="panel-table" role="presentation">
+      <tr><td class="panel-title" colspan="2">Member Search</td></tr>
+      <tr>
+        <td class="search-pane">
+          <table class="form-grid" role="presentation">
+            <tr><td>Search type</td><td><select><option>Member number</option><option>Last name</option></select></td></tr>
+            <tr><td>Member number</td><td><input autocomplete="off" inputmode="numeric" maxlength="10" /></td></tr>
+            <tr><td>Last name</td><td><input autocomplete="off" /></td></tr>
+            <tr><td>Date of birth</td><td><input autocomplete="off" placeholder="MM/DD/YYYY" /></td></tr>
+            <tr><td></td><td class="actions"><input type="button" value="Find Member" /><a href="#" class="clear-link">Clear</a></td></tr>
+          </table>
+        </td>
+        <td class="help-pane">
+          <strong>Search hints</strong>
+          <ul>
+            <li>Enter the full member number.</li>
+            <li>Search is limited to the selected branch.</li>
+            <li>Press F2 to clear the form.</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+    <div class="message-area" aria-live="polite"></div>
+    <div class="result-area"></div>
+    <div class="legacy-footer-actions">
+      <button type="button">F1 Help</button><button type="button">F2 New Search</button><button type="button">F5 Refresh</button><button type="button">F6 Print</button><button type="button">F9 Back</button><button type="button">F10 Menu</button>
+    </div>
+
+    <div class="modal-shade" hidden>
+      <div class="legacy-dialog" role="dialog" aria-modal="true">
+        <div class="dialog-title">System message</div>
+        <div class="dialog-body">
+          <div class="warning-icon" aria-hidden="true">!</div>
+          <div class="dialog-copy"></div>
+        </div>
+        <div class="dialog-actions"></div>
+      </div>
+    </div>
+
+    <script src="/legacy/legacy.js"></script>
+  </body>
+</html>

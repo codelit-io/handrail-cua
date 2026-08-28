@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactId": "member.balance.lookup",
+  "artifactDigest": "d06ba78e8be50f9ff23bf0a5bb51ae5c05a043c9cb66bf85b4ac0c38bbc3da64",
+  "requestedRuns": 10,
+  "completedRuns": 10,
+  "succeeded": 10,
+  "successRate": 1,
+  "allZeroModelCalls": true,
+  "totalModelCalls": 0,
+  "latencyMs": {
+    "min": 1931,
+    "max": 2028,
+    "mean": 1967.4,
+    "p50": 1966,
+    "p95": 2028
+  },
+  "runs": [
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-01",
+      "status": "succeeded",
+      "durationMs": 2028,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-02",
+      "status": "succeeded",
+      "durationMs": 1990,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-03",
+      "status": "succeeded",
+      "durationMs": 1991,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-04",
+      "status": "succeeded",
+      "durationMs": 1944,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-05",
+      "status": "succeeded",
+      "durationMs": 1966,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-06",
+      "status": "succeeded",
+      "durationMs": 1985,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-07",
+      "status": "succeeded",
+      "durationMs": 1972,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-08",
+      "status": "succeeded",
+      "durationMs": 1935,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-09",
+      "status": "succeeded",
+      "durationMs": 1931,
+      "modelCalls": 0
+    },
+    {
+      "runId": "submission-live-qwen3-4b-replay-success-10",
+      "status": "succeeded",
+      "durationMs": 1932,
+      "modelCalls": 0
+    }
+  ]
+}

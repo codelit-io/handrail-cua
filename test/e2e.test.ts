@@ -8,7 +8,7 @@ import {
   type CapabilityArtifactDraft,
   RunResultSchema,
 } from "../src/domain/schema.js";
-import { type OperatorConsoleHandle, startOperatorConsole } from "../src/operator/index.js";
+import { allowLoopbackDemoOperatorAction, startOperatorConsole } from "../src/operator/index.js";
 import { compileArtifact } from "../src/runtime/artifact.js";
 import { ControlCoordinator, ControlError, type ControlGrant } from "../src/runtime/control.js";
 import {
@@ -291,17 +291,23 @@ async function calibrateArtifact(
 }
 
 async function postOperatorAction(
-  consoleServer: OperatorConsoleHandle,
-  sessionId: string,
+  interventionUrl: string,
   action: string,
   body: Readonly<Record<string, unknown>>,
 ): Promise<Response> {
-  return fetch(`${consoleServer.origin}/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
+  const operatorUrl = new URL(interventionUrl);
+  const sessionId = decodeURIComponent(
+    operatorUrl.pathname.split("/").filter(Boolean).at(-1) ?? "",
+  );
+  const capability = new URLSearchParams(operatorUrl.hash.slice(1)).get("capability") ?? "";
+  if (!sessionId || !capability) throw new Error("Intervention URL is missing capability context.");
+  return fetch(`${operatorUrl.origin}/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Origin: consoleServer.origin,
+      Origin: operatorUrl.origin,
       "X-Handrail-Console": "1",
+      "X-Handrail-Capability": capability,
     },
     body: JSON.stringify(body),
   });
@@ -423,7 +429,11 @@ describe("real-browser end-to-end replay", { concurrency: 1 }, () => {
   });
 
   it("hands the exact expired session to an operator, resumes it, and finishes replay", async () => {
-    const consoleServer = await startOperatorConsole({ control, surface });
+    const consoleServer = await startOperatorConsole({
+      control,
+      surface,
+      authorizeOperatorAction: allowLoopbackDemoOperatorAction,
+    });
     let handlerCalls = 0;
     let handoffSessionId = "";
     let auditActions: readonly string[] = [];
@@ -465,43 +475,32 @@ describe("real-browser end-to-end replay", { concurrency: 1 }, () => {
             (error: unknown) => error instanceof ControlError && error.code === "CONTROL_LOST",
           );
           const waiting = intervention.state();
-          const claimResponse = await postOperatorAction(
-            consoleServer,
-            context.session.id,
-            "claim",
-            { operatorId: "e2e-operator", expectedEpoch: waiting.control.epoch },
-          );
+          const claimResponse = await postOperatorAction(intervention.url, "claim", {
+            operatorId: "e2e-operator",
+            expectedEpoch: waiting.control.epoch,
+          });
           assert.equal(claimResponse.status, 200, await claimResponse.clone().text());
           const claim = await jsonBody<{ claimId: string; epoch: number }>(claimResponse);
 
-          const clickResponse = await postOperatorAction(
-            consoleServer,
-            context.session.id,
-            "click",
-            {
-              claimId: claim.claimId,
-              epoch: claim.epoch,
-              x: (restore.bounds.x + restore.bounds.width / 2) * context.session.viewport.width,
-              y: (restore.bounds.y + restore.bounds.height / 2) * context.session.viewport.height,
-            },
-          );
+          const clickResponse = await postOperatorAction(intervention.url, "click", {
+            claimId: claim.claimId,
+            epoch: claim.epoch,
+            x: (restore.bounds.x + restore.bounds.width / 2) * context.session.viewport.width,
+            y: (restore.bounds.y + restore.bounds.height / 2) * context.session.viewport.height,
+          });
           assert.equal(clickResponse.status, 200, await clickResponse.clone().text());
 
-          const captureResponse = await postOperatorAction(
-            consoleServer,
-            context.session.id,
-            "capture",
-            { claimId: claim.claimId, epoch: claim.epoch },
-          );
+          const captureResponse = await postOperatorAction(intervention.url, "capture", {
+            claimId: claim.claimId,
+            epoch: claim.epoch,
+          });
           assert.equal(captureResponse.status, 200, await captureResponse.clone().text());
 
           const resumedFromHandle = intervention.waitForResume();
-          const resumeResponse = await postOperatorAction(
-            consoleServer,
-            context.session.id,
-            "resume",
-            { claimId: claim.claimId, epoch: claim.epoch },
-          );
+          const resumeResponse = await postOperatorAction(intervention.url, "resume", {
+            claimId: claim.claimId,
+            epoch: claim.epoch,
+          });
           assert.equal(resumeResponse.status, 200, await resumeResponse.clone().text());
           const resumed = await resumedFromHandle;
           assert.equal(resumed.sessionId, context.session.id);

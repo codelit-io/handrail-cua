@@ -77,6 +77,14 @@ export const DEMO_ARTIFACT_SPEC: DiscoveryArtifactSpec = {
   outputBindings: {
     savingsBalance: { source: "text", transforms: ["trim", "currency_to_number"] },
   },
+  activationPolicies: [
+    {
+      role: "button",
+      name: "Find Member",
+      effect: "read",
+      idempotency: "idempotent",
+    },
+  ],
   versionRange: ">=1 <2",
   requiredSurfaceCapabilities: [
     "accessibility_tree",

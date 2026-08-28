@@ -3,17 +3,20 @@ import { constants as fileConstants } from "node:fs";
 import { lstat, open, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { z } from "zod";
 import {
+  ArtifactApprovalSchema,
   CapabilityArtifactSchema,
   EvidenceRefSchema,
   IdentifierSchema,
+  InterventionReasonSchema,
   RunResultSchema,
   Sha256Schema,
 } from "../src/domain/schema.js";
-import { verifyArtifactDigest } from "../src/runtime/artifact.js";
+import { assertArtifactApproval, verifyArtifactDigest } from "../src/runtime/artifact.js";
+import { type PersistedAuditEvent, PersistedAuditEventSchema } from "../src/runtime/evidence.js";
 import { findSensitivePatterns } from "../src/runtime/redaction.js";
 
 const RelativePathSchema = z
@@ -45,7 +48,7 @@ const ManifestRunSchema = z
   .object({
     id: IdentifierSchema,
     kind: z.enum(["discovery", "replay"]),
-    scenario: z.enum(["success", "exception"]),
+    scenario: z.enum(["success", "exception", "handoff"]),
     directory: RelativePathSchema,
     summary: RelativePathSchema,
     summarySha256: Sha256Schema,
@@ -57,7 +60,7 @@ const ManifestRunSchema = z
 
 const EvidenceManifestSchema = z
   .object({
-    schemaVersion: z.literal("1.1.0"),
+    schemaVersion: z.literal("1.2.0"),
     generatedAt: z.iso.datetime({ offset: true }),
     mode: z.enum(["scripted", "live"]),
     model: z
@@ -68,8 +71,28 @@ const EvidenceManifestSchema = z
         digest: z.string().min(8).max(256).optional(),
       })
       .strict(),
+    provenance: z
+      .object({
+        sourceRevision: z.union([z.literal("working-tree"), z.string().regex(/^[a-f0-9]{40}$/u)]),
+        sourceTreeSha256: Sha256Schema,
+        targetFixtureSha256: Sha256Schema,
+        nodeVersion: z.string().regex(/^v\d+\.\d+\.\d+(?:[-+].+)?$/u),
+        playwrightVersion: z.string().min(1).max(80),
+        invocation: z
+          .object({
+            command: z.enum(["demo:offline", "demo:live"]),
+            planner: z.enum(["scripted", "live"]),
+            replayRuns: z.number().int().min(1).max(50),
+            screenshotModelInput: z.boolean(),
+            syntheticTarget: z.boolean(),
+          })
+          .strict(),
+      })
+      .strict(),
     artifact: RelativePathSchema,
     artifactSha256: Sha256Schema,
+    artifactApproval: RelativePathSchema,
+    artifactApprovalSha256: Sha256Schema,
     stability: z.object({ path: RelativePathSchema, sha256: Sha256Schema }).strict(),
     runs: z.array(ManifestRunSchema).min(3).max(100),
   })
@@ -103,13 +126,65 @@ const DiscoverySummarySchema = z
   })
   .passthrough();
 
+const HandoffEvidenceSummarySchema = z
+  .object({
+    interventionId: IdentifierSchema,
+    reason: InterventionReasonSchema,
+    originalSessionId: IdentifierSchema,
+    resumedSessionId: IdentifierSchema,
+    sameSession: z.literal(true),
+    automationEpochBefore: z.number().int().min(0),
+    operatorEpoch: z.number().int().min(0),
+    automationEpochAfter: z.number().int().min(0),
+    checkpointPassed: z.literal(true),
+    operatorAuditEvents: z.number().int().min(4).max(1_000),
+    evidence: z
+      .array(EvidenceRefSchema)
+      .min(2)
+      .max(20)
+      .refine(
+        (refs) => refs.every((ref) => ref.kind === "screenshot"),
+        "Handoff evidence must contain screenshots only.",
+      ),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.originalSessionId !== value.resumedSessionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["resumedSessionId"],
+        message: "Handoff must resume the original live session.",
+      });
+    }
+    if (
+      value.automationEpochBefore >= value.operatorEpoch ||
+      value.operatorEpoch >= value.automationEpochAfter
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["automationEpochAfter"],
+        message: "Handoff authority epochs must advance automation -> operator -> automation.",
+      });
+    }
+  });
+
 const ReplaySummarySchema = z
   .object({
     kind: z.literal("replay"),
-    scenario: z.enum(["success", "exception"]),
+    scenario: z.enum(["success", "exception", "handoff"]),
     result: RunResultSchema,
+    handoff: HandoffEvidenceSummarySchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.scenario === "handoff") !== Boolean(value.handoff)) {
+      context.addIssue({
+        code: "custom",
+        path: ["handoff"],
+        message: "A handoff summary is required only for handoff replay scenarios.",
+      });
+    }
+  });
 
 const StabilitySchema = z
   .object({
@@ -149,6 +224,7 @@ const FORBIDDEN_FILE =
 const TEXT_FILE = /\.(?:json|jsonl|md|txt|toml|ya?ml)$/iu;
 const READ_NOFOLLOW_FLAGS = fileConstants.O_RDONLY | (fileConstants.O_NOFOLLOW ?? 0);
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export interface EvidenceValidationOptions {
   readonly allowScriptedDiscovery?: boolean;
@@ -212,7 +288,19 @@ async function jsonFile(absolutePath: string, label: string): Promise<unknown> {
   }
 }
 
-async function validateJsonLines(absolutePath: string, label: string): Promise<number> {
+interface EventLogValidation {
+  readonly count: number;
+  readonly modelDecisions: number;
+  readonly operatorAuditEvents: number;
+  readonly terminalModelCalls?: number;
+}
+
+async function validateJsonLines(
+  absolutePath: string,
+  label: string,
+  expectedRunId: string,
+  kind: ManifestRun["kind"],
+): Promise<EventLogValidation> {
   const bytes = await requireRegularFile(absolutePath, label);
   const lines = bytes
     .toString("utf8")
@@ -220,17 +308,49 @@ async function validateJsonLines(absolutePath: string, label: string): Promise<n
     .map((line) => line.trim())
     .filter(Boolean);
   if (lines.length === 0) throw new Error(`${label} must contain at least one event.`);
+  const events: PersistedAuditEvent[] = [];
   for (const [index, line] of lines.entries()) {
     try {
-      const value = JSON.parse(line) as unknown;
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        throw new TypeError("event is not an object");
-      }
+      const value = PersistedAuditEventSchema.parse(JSON.parse(line) as unknown);
+      if (value.runId !== expectedRunId) throw new TypeError("event runId does not match");
+      if (value.sequence !== index) throw new TypeError("event sequence is not contiguous");
+      events.push(value);
     } catch {
-      throw new Error(`${label} line ${index + 1} is not a JSON object.`);
+      throw new Error(`${label} line ${index + 1} violates the persisted audit-event contract.`);
     }
   }
-  return lines.length;
+  if (new Set(events.map((event) => event.eventId)).size !== events.length) {
+    throw new Error(`${label} contains duplicate event IDs.`);
+  }
+  const expectedStart = kind === "discovery" ? "run.started" : "replay.started";
+  const expectedTerminal = kind === "discovery" ? "run.completed" : "replay.completed";
+  if (events[0]?.type !== expectedStart || events.at(-1)?.type !== expectedTerminal) {
+    throw new Error(`${label} must have the expected start and terminal events.`);
+  }
+  const terminal = events.at(-1);
+  const terminalModelCalls = terminal?.modelCalls;
+  if (
+    terminalModelCalls !== undefined &&
+    (!Number.isSafeInteger(terminalModelCalls) || Number(terminalModelCalls) < 0)
+  ) {
+    throw new Error(`${label} terminal modelCalls must be a non-negative integer.`);
+  }
+  if (
+    kind === "replay" &&
+    events.some(
+      (event) =>
+        event.type === "model.decision" ||
+        (event.modelCalls !== undefined && event.modelCalls !== 0),
+    )
+  ) {
+    throw new Error(`${label} replay events must prove zero model calls.`);
+  }
+  return {
+    count: events.length,
+    modelDecisions: events.filter((event) => event.type === "model.decision").length,
+    operatorAuditEvents: events.filter((event) => event.type === "operator.audit").length,
+    ...(terminalModelCalls === undefined ? {} : { terminalModelCalls: Number(terminalModelCalls) }),
+  };
 }
 
 async function walk(root: string): Promise<string[]> {
@@ -251,6 +371,17 @@ async function walk(root: string): Promise<string[]> {
     }
   }
   return files.sort();
+}
+
+async function treeSha256(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  for (const relative of await walk(root)) {
+    hash.update(relative, "utf8");
+    hash.update("\0", "utf8");
+    hash.update(await requireRegularFile(path.join(root, relative), `Source file ${relative}`));
+    hash.update("\0", "utf8");
+  }
+  return hash.digest("hex");
 }
 
 async function validateHashes(
@@ -394,8 +525,40 @@ export async function validateEvidenceBundle(
   const manifest = EvidenceManifestSchema.parse(
     await jsonFile(path.join(root, "manifest.json"), "Evidence manifest"),
   );
+  const expectedSourceTree = await treeSha256(path.join(PROJECT_ROOT, "src"));
+  const expectedTargetFixture = await treeSha256(path.join(PROJECT_ROOT, "src", "target"));
+  if (
+    manifest.provenance.sourceTreeSha256 !== expectedSourceTree ||
+    manifest.provenance.targetFixtureSha256 !== expectedTargetFixture
+  ) {
+    throw new Error("Evidence runtime provenance does not match the checked-out source tree.");
+  }
+  const playwrightManifest = (await jsonFile(
+    path.join(PROJECT_ROOT, "node_modules", "playwright", "package.json"),
+    "Installed Playwright manifest",
+  )) as { readonly version?: unknown };
+  if (playwrightManifest.version !== manifest.provenance.playwrightVersion) {
+    throw new Error("Evidence Playwright provenance does not match the installed runtime.");
+  }
+  if (
+    manifest.provenance.invocation.planner !== manifest.mode ||
+    manifest.provenance.invocation.command !==
+      (manifest.mode === "live" ? "demo:live" : "demo:offline")
+  ) {
+    throw new Error("Evidence invocation provenance is inconsistent with manifest mode.");
+  }
   if (manifest.mode !== "live" && options.allowScriptedDiscovery !== true) {
     throw new Error("Committed evidence manifest must identify a live discovery mode.");
+  }
+  if (
+    options.allowScriptedDiscovery !== true &&
+    (manifest.provenance.sourceRevision === "working-tree" ||
+      manifest.provenance.invocation.screenshotModelInput ||
+      !manifest.provenance.invocation.syntheticTarget)
+  ) {
+    throw new Error(
+      "Committed live evidence requires a revision-bound, semantic-only, synthetic-target invocation.",
+    );
   }
 
   await validateHashes(root, manifest.artifact, manifest.artifactSha256, "Capability artifact");
@@ -403,6 +566,19 @@ export async function validateEvidenceBundle(
     await jsonFile(inside(root, manifest.artifact), "Capability artifact"),
   );
   if (!verifyArtifactDigest(artifact)) throw new Error("Capability artifact digest is invalid.");
+  if (!manifest.artifactApproval.startsWith("artifacts/")) {
+    throw new Error("Artifact approval must remain inside the evidence artifacts directory.");
+  }
+  await validateHashes(
+    root,
+    manifest.artifactApproval,
+    manifest.artifactApprovalSha256,
+    "Artifact approval",
+  );
+  const artifactApproval = ArtifactApprovalSchema.parse(
+    await jsonFile(inside(root, manifest.artifactApproval), "Artifact approval"),
+  );
+  assertArtifactApproval(artifact, artifactApproval, new Date(manifest.generatedAt));
   if (artifact.provenance.liveModel !== true && options.allowScriptedDiscovery !== true) {
     throw new Error("Capability artifact provenance must record liveModel true.");
   }
@@ -423,6 +599,9 @@ export async function validateEvidenceBundle(
   const stability = StabilitySchema.parse(
     await jsonFile(inside(root, manifest.stability.path), "Replay stability report"),
   );
+  if (manifest.provenance.invocation.replayRuns !== stability.requestedRuns) {
+    throw new Error("Evidence invocation replay count is inconsistent with stability evidence.");
+  }
   if (
     stability.artifactId !== artifact.id ||
     stability.artifactDigest !== artifact.digest ||
@@ -449,6 +628,9 @@ export async function validateEvidenceBundle(
   const exceptionalReplays = manifest.runs.filter(
     (run) => run.kind === "replay" && run.scenario === "exception",
   );
+  const handoffReplays = manifest.runs.filter(
+    (run) => run.kind === "replay" && run.scenario === "handoff",
+  );
   if (new Set(manifest.runs.map((run) => run.id)).size !== manifest.runs.length) {
     throw new Error("Manifest run IDs must be unique.");
   }
@@ -457,6 +639,9 @@ export async function validateEvidenceBundle(
   if (successReplays.length < 1) throw new Error("Manifest must contain a successful replay run.");
   if (exceptionalReplays.length < 1) {
     throw new Error("Manifest must contain an exceptional replay run.");
+  }
+  if (options.allowScriptedDiscovery !== true && handoffReplays.length < 1) {
+    throw new Error("Committed live evidence must contain a same-session handoff replay run.");
   }
   const stabilityRunIds = new Set(stability.runs.map((run) => run.runId));
   const successfulReplayIds = new Set(successReplays.map((run) => run.id));
@@ -491,7 +676,12 @@ export async function validateEvidenceBundle(
     }
     await validateHashes(root, run.summary, run.summarySha256, `Run ${run.id} summary`);
     await validateHashes(root, run.events, run.eventsSha256, `Run ${run.id} events`);
-    await validateJsonLines(inside(root, run.events), `Run ${run.id} events`);
+    const eventLog = await validateJsonLines(
+      inside(root, run.events),
+      `Run ${run.id} events`,
+      run.id,
+      run.kind,
+    );
 
     const screenshotDirectory = path.join(inside(root, run.directory), "screenshots");
     await requireDirectory(screenshotDirectory, `Run ${run.id} screenshots`);
@@ -501,6 +691,14 @@ export async function validateEvidenceBundle(
       const parsed = DiscoverySummarySchema.parse(summary);
       if (parsed.runId !== run.id || parsed.provenance.discoveryRunId !== run.id) {
         throw new Error("Discovery summary run identity is inconsistent.");
+      }
+      if (
+        eventLog.modelDecisions !== parsed.modelCalls ||
+        eventLog.terminalModelCalls !== parsed.modelCalls
+      ) {
+        throw new Error(
+          "Discovery event log model-call evidence is inconsistent with its summary.",
+        );
       }
       if (parsed.artifactDigest !== artifact.digest || parsed.artifactId !== artifact.id) {
         throw new Error("Discovery summary does not reference the root artifact.");
@@ -524,6 +722,9 @@ export async function validateEvidenceBundle(
       }
     } else {
       const parsed = ReplaySummarySchema.parse(summary);
+      if (eventLog.modelDecisions !== 0 || eventLog.terminalModelCalls !== 0) {
+        throw new Error(`Replay ${run.id} event log does not prove zero model calls.`);
+      }
       if (parsed.scenario !== run.scenario || parsed.result.meta.runId !== run.id) {
         throw new Error(`Replay summary identity is inconsistent for ${run.id}.`);
       }
@@ -536,11 +737,26 @@ export async function validateEvidenceBundle(
       if (run.scenario === "exception" && parsed.result.status === "succeeded") {
         throw new Error(`Replay ${run.id} is labeled exceptional but succeeded.`);
       }
-      for (const screenshot of await validateRunScreenshots(
-        root,
-        run,
-        replayEvidenceRefs(parsed.result),
-      )) {
+      if (run.scenario === "handoff") {
+        if (parsed.result.status !== "succeeded" || !parsed.handoff) {
+          throw new Error(`Replay ${run.id} is labeled handoff but did not resume successfully.`);
+        }
+        if (
+          parsed.result.meta.sessionId !== parsed.handoff.originalSessionId ||
+          parsed.result.meta.sessionId !== parsed.handoff.resumedSessionId
+        ) {
+          throw new Error(`Replay ${run.id} handoff session identity is inconsistent.`);
+        }
+        if (eventLog.operatorAuditEvents !== parsed.handoff.operatorAuditEvents) {
+          throw new Error(`Replay ${run.id} operator audit-event count is inconsistent.`);
+        }
+      } else if (eventLog.operatorAuditEvents !== 0) {
+        throw new Error(`Replay ${run.id} unexpectedly contains operator audit events.`);
+      }
+      for (const screenshot of await validateRunScreenshots(root, run, [
+        ...replayEvidenceRefs(parsed.result),
+        ...(parsed.handoff?.evidence ?? []),
+      ])) {
         if (referencedScreenshots.has(screenshot)) {
           throw new Error(`Screenshot ${screenshot} is referenced by more than one run.`);
         }

@@ -2,23 +2,31 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  type AppBinding,
   AppBindingSchema,
+  type ArtifactApproval,
   AutomationEventSchema,
+  type CapabilityArtifact,
   type CapabilityArtifactDraft,
   ModelDecisionSchema,
   RunResultSchema,
   RuntimeJsonSchemas,
 } from "../src/domain/schema.js";
 import {
+  ArtifactApprovalError,
   ArtifactBindingError,
   ArtifactCompilationError,
+  assertArtifactApproval,
   assertValidArtifact,
   bindArtifactInputs,
+  bindReviewedTargetOverrides,
   bindValueExpression,
   canonicalStringify,
   compileArtifact,
   computeArtifactDigest,
+  computeTargetDigest,
   lintArtifact,
+  TargetOverrideReviewError,
   validateArtifactOutputs,
   verifyArtifactDigest,
 } from "../src/runtime/artifact.js";
@@ -182,6 +190,29 @@ function validDraft(): CapabilityArtifactDraft {
   };
 }
 
+function validBinding(artifact: CapabilityArtifact): AppBinding {
+  return AppBindingSchema.parse({
+    schemaVersion: "1.0.0",
+    id: "demo-tenant",
+    product: {
+      vendor: artifact.compatibility.product.vendor,
+      product: artifact.compatibility.product.product,
+      tenantLabel: "Synthetic demo tenant",
+    },
+    origin: "http://127.0.0.1:4173",
+    entrypoints: { "member-console": "/legacy" },
+    secretRefs: {},
+    expectedFingerprint: artifact.compatibility.fingerprint,
+    targetOverrides: {},
+    policy: {
+      allowedOrigins: ["http://127.0.0.1:4173"],
+      allowedRoutes: ["/legacy"],
+      allowedCommands: ["set_value", "activate", "extract"],
+      allowedEffects: ["read", "reversible_write"],
+    },
+  });
+}
+
 describe("capability artifact contracts", () => {
   it("compiles a strict draft, binds a canonical digest, and freezes the result", () => {
     const artifact = compileArtifact(validDraft());
@@ -214,6 +245,82 @@ describe("capability artifact contracts", () => {
     const result = lintArtifact(changed);
     assert.equal(result.ok, false);
     assert.ok(result.issues.some((entry) => entry.code === "DIGEST_MISMATCH"));
+  });
+
+  it("binds a trusted artifact approval to immutable identity and valid time", () => {
+    const artifact = compileArtifact(validDraft());
+    const approval: ArtifactApproval = {
+      artifactId: artifact.id,
+      revision: artifact.revision,
+      digest: artifact.digest,
+      approvedBy: "reviewer-01",
+      approvedAt: "2026-08-27T17:00:00.000Z",
+      expiresAt: "2026-08-27T19:00:00.000Z",
+    };
+    assert.equal(
+      assertArtifactApproval(artifact, approval, new Date(CREATED_AT)).digest,
+      artifact.digest,
+    );
+
+    for (const rejected of [
+      { ...approval, artifactId: "another-artifact" },
+      { ...approval, revision: artifact.revision + 1 },
+      { ...approval, digest: "b".repeat(64) },
+      {
+        ...approval,
+        approvedAt: "2026-08-27T20:00:00.000Z",
+        expiresAt: "2026-08-27T21:00:00.000Z",
+      },
+      { ...approval, expiresAt: "2026-08-27T17:30:00.000Z" },
+    ]) {
+      assert.throws(
+        () => assertArtifactApproval(artifact, rejected, new Date(CREATED_AT)),
+        (error: unknown) => error instanceof ArtifactApprovalError,
+      );
+    }
+  });
+
+  it("binds target overrides only when exact base and replacement digests were reviewed", () => {
+    const artifact = compileArtifact(validDraft());
+    const baseBinding = validBinding(artifact);
+    const baseTarget = artifact.targets.lookupButton;
+    assert.ok(baseTarget);
+    const overrideTarget = structuredClone(baseTarget);
+    overrideTarget.robustnessRationale =
+      "Tenant review confirmed these equivalent semantic locators for this exact surface.";
+    const binding = AppBindingSchema.parse({
+      ...baseBinding,
+      targetOverrides: { lookupButton: overrideTarget },
+      targetOverrideReviews: {
+        lookupButton: {
+          baseTargetDigest: computeTargetDigest(baseTarget),
+          overrideTargetDigest: computeTargetDigest(overrideTarget),
+          reviewedBy: "reviewer-01",
+          reviewedAt: "2026-08-27T17:00:00.000Z",
+          expiresAt: "2026-08-27T19:00:00.000Z",
+        },
+      },
+    });
+    assert.deepEqual(
+      bindReviewedTargetOverrides(artifact, binding, new Date(CREATED_AT)).lookupButton,
+      overrideTarget,
+    );
+
+    const tampered = structuredClone(binding);
+    const tamperedTarget = tampered.targetOverrides.lookupButton;
+    assert.ok(tamperedTarget);
+    tamperedTarget.description = "A silently changed semantic target";
+    assert.throws(
+      () => bindReviewedTargetOverrides(artifact, tampered, new Date(CREATED_AT)),
+      (error: unknown) => error instanceof TargetOverrideReviewError,
+    );
+    assert.equal(
+      AppBindingSchema.safeParse({
+        ...baseBinding,
+        targetOverrides: { lookupButton: overrideTarget },
+      }).success,
+      false,
+    );
   });
 
   it("exports draft 2020-12 JSON Schemas from the runtime Zod contracts", () => {
@@ -397,26 +504,7 @@ describe("typed runtime binding", () => {
 describe("related runtime contracts", () => {
   it("accepts exact-origin tenant bindings and rejects path-bearing origins", () => {
     const artifact = compileArtifact(validDraft());
-    const binding = {
-      schemaVersion: "1.0.0",
-      id: "demo-tenant",
-      product: {
-        vendor: artifact.compatibility.product.vendor,
-        product: artifact.compatibility.product.product,
-        tenantLabel: "Synthetic demo tenant",
-      },
-      origin: "http://127.0.0.1:4173",
-      entrypoints: { "member-console": "/legacy" },
-      secretRefs: {},
-      expectedFingerprint: artifact.compatibility.fingerprint,
-      targetOverrides: {},
-      policy: {
-        allowedOrigins: ["http://127.0.0.1:4173"],
-        allowedRoutes: ["/legacy"],
-        allowedCommands: ["set_value", "activate", "extract"],
-        allowedEffects: ["read", "reversible_write"],
-      },
-    } as const;
+    const binding = validBinding(artifact);
     assert.equal(AppBindingSchema.safeParse(binding).success, true);
     assert.equal(
       AppBindingSchema.safeParse({ ...binding, origin: "http://127.0.0.1:4173/legacy" }).success,

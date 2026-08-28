@@ -12,7 +12,13 @@ import {
   unlink,
 } from "node:fs/promises";
 import path from "node:path";
-import type { AutomationEvent, EvidenceRef as DomainEvidenceRef } from "../domain/schema.js";
+import { z } from "zod";
+import {
+  type AutomationEvent,
+  type EvidenceRef as DomainEvidenceRef,
+  IdentifierSchema,
+  IsoTimestampSchema,
+} from "../domain/schema.js";
 import {
   findSensitivePatterns,
   type RedactedValue,
@@ -23,6 +29,100 @@ import {
 
 export type EvidenceRef = DomainEvidenceRef;
 export type EvidenceKind = EvidenceRef["kind"];
+
+const FAULT_DIAGNOSTICS: Readonly<
+  Record<string, { readonly expectedCategory: string; readonly observedCategory: string }>
+> = {
+  ARTIFACT_INVALID: {
+    expectedCategory: "reviewed_artifact_contract",
+    observedCategory: "artifact_contract_rejected",
+  },
+  ARTIFACT_DIGEST_MISMATCH: {
+    expectedCategory: "reviewed_artifact_digest",
+    observedCategory: "artifact_content_drift",
+  },
+  INPUT_INVALID: {
+    expectedCategory: "typed_invocation_input",
+    observedCategory: "input_contract_rejected",
+  },
+  INCOMPATIBLE_SURFACE: {
+    expectedCategory: "approved_surface_fingerprint",
+    observedCategory: "surface_fingerprint_below_threshold",
+  },
+  POLICY_DENIED: {
+    expectedCategory: "allowed_policy_intersection",
+    observedCategory: "policy_intersection_denied",
+  },
+  PERMISSION_DENIED: {
+    expectedCategory: "authorized_application_state",
+    observedCategory: "application_permission_denied",
+  },
+  TARGET_NOT_FOUND: {
+    expectedCategory: "exactly_one_visible_target",
+    observedCategory: "zero_matching_targets",
+  },
+  TARGET_AMBIGUOUS: {
+    expectedCategory: "exactly_one_visible_target",
+    observedCategory: "multiple_matching_targets",
+  },
+  POSTCONDITION_FAILED: {
+    expectedCategory: "declared_step_postcondition",
+    observedCategory: "postcondition_not_satisfied",
+  },
+  RECOVERY_EXHAUSTED: {
+    expectedCategory: "bounded_recovery_success",
+    observedCategory: "recovery_budget_exhausted",
+  },
+  CONTROL_LOST: {
+    expectedCategory: "current_control_lease",
+    observedCategory: "stale_or_missing_control_lease",
+  },
+  SESSION_LOST: {
+    expectedCategory: "same_live_session",
+    observedCategory: "live_session_unavailable",
+  },
+  MODEL_INVALID_DECISION: {
+    expectedCategory: "fresh_structured_model_decision",
+    observedCategory: "model_decision_contract_rejected",
+  },
+  MODEL_UNAVAILABLE: {
+    expectedCategory: "bounded_model_response",
+    observedCategory: "model_endpoint_unavailable",
+  },
+  DEAD_END: {
+    expectedCategory: "safe_progress_action",
+    observedCategory: "no_safe_progress_action",
+  },
+  MAX_STEPS: {
+    expectedCategory: "goal_within_step_budget",
+    observedCategory: "step_budget_exhausted",
+  },
+  RUN_TIMEOUT: {
+    expectedCategory: "goal_within_time_budget",
+    observedCategory: "run_time_budget_exhausted",
+  },
+  UNKNOWN_DIALOG: {
+    expectedCategory: "declared_surface_state",
+    observedCategory: "unknown_blocking_dialog",
+  },
+  INTERNAL_ERROR: {
+    expectedCategory: "runtime_invariant",
+    observedCategory: "internal_runtime_failure",
+  },
+};
+
+/** Fixed diagnostic categories preserve debuggability without persisting raw page text. */
+export function safeFaultDiagnostic(code: string): {
+  readonly expectedCategory: string;
+  readonly observedCategory: string;
+} {
+  return (
+    FAULT_DIAGNOSTICS[code] ?? {
+      expectedCategory: "declared_runtime_invariant",
+      observedCategory: "unclassified_runtime_condition",
+    }
+  );
+}
 
 export interface EventAppendReceipt {
   readonly eventId: string;
@@ -40,6 +140,32 @@ export interface EvidenceEventInput extends Readonly<Record<string, unknown>> {
   readonly eventId?: string;
   readonly timestamp?: string;
 }
+
+/**
+ * The single on-disk JSONL contract. Domain-specific fields remain flat and reviewable,
+ * while this envelope is mandatory for every discovery, replay, and operator event.
+ */
+export const PersistedAuditEventSchema = z
+  .object({
+    schemaVersion: z.literal("1.0.0"),
+    eventId: IdentifierSchema,
+    sequence: z.number().int().min(0),
+    timestamp: IsoTimestampSchema,
+    runId: IdentifierSchema,
+    correlationId: IdentifierSchema,
+    sessionId: IdentifierSchema.optional(),
+    artifactId: IdentifierSchema.optional(),
+    actor: z.enum(["automation", "model", "operator", "system"]),
+    ownerEpoch: z.number().int().min(0),
+    type: z
+      .string()
+      .trim()
+      .min(3)
+      .max(160)
+      .regex(/^[a-z][a-z0-9._-]+$/u),
+  })
+  .passthrough();
+export type PersistedAuditEvent = z.infer<typeof PersistedAuditEventSchema>;
 
 export interface EvidenceWriterOptions {
   readonly rootDirectory: string;
@@ -185,10 +311,13 @@ function projectModelDecision(value: unknown): Record<string, unknown> | undefin
   const decision = ownRecord(value);
   if (!decision) return undefined;
   const kind = ownDataProperty(decision, "kind");
-  const common = pickOwnDataProperties(decision, ["decisionId", "observationId", "kind"]);
+  const common = {
+    ...pickOwnDataProperties(decision, ["decisionId", "observationId", "kind"]),
+    reasonCode: typeof kind === "string" ? `planner_${kind}` : "planner_unknown",
+  };
   switch (kind) {
     case "set_value": {
-      const projected = {
+      const projected: Record<string, unknown> = {
         ...common,
         ...pickOwnDataProperties(decision, ["elementRef"]),
       };
@@ -232,7 +361,16 @@ function projectIntervention(value: unknown): Record<string, unknown> | undefine
 function projectFault(value: unknown): Record<string, unknown> | undefined {
   const fault = ownRecord(value);
   if (!fault) return undefined;
-  return pickOwnDataProperties(fault, ["code", "phase", "retryable", "stepId", "evidence"]);
+  const projected = pickOwnDataProperties(fault, [
+    "code",
+    "phase",
+    "retryable",
+    "stepId",
+    "evidence",
+  ]);
+  const code = ownDataProperty(fault, "code");
+  if (typeof code === "string") projected.diagnostic = safeFaultDiagnostic(code);
+  return projected;
 }
 
 function projectPredicateValueExpression(value: unknown): Record<string, unknown> | undefined {
@@ -396,6 +534,8 @@ function projectPersistentEvent(event: object, eventType: string): object {
     ]);
     const fault = projectFault(ownDataProperty(event, "fault"));
     if (fault) projected.fault = fault;
+    const code = ownDataProperty(event, "code");
+    if (typeof code === "string") projected.diagnostic = safeFaultDiagnostic(code);
     return projected;
   }
 
@@ -490,6 +630,7 @@ export class EvidenceWriter {
   private readonly now: () => Date;
   private readonly initialized: Promise<string>;
   private appendTail: Promise<void> = Promise.resolve();
+  private readonly nextSequenceByRun = new Map<string, number>();
 
   constructor(options: EvidenceWriterOptions) {
     if (!path.isAbsolute(options.rootDirectory)) {
@@ -638,12 +779,51 @@ export class EvidenceWriter {
         typeof timestampValue === "string" && Number.isFinite(Date.parse(timestampValue))
           ? new Date(timestampValue).toISOString()
           : isoTimestamp(this.now());
+      const nextSequence = this.nextSequenceByRun.get(runIdValue) ?? 0;
       const redactedEvent = redactValue(projectPersistentEvent(event, typeValue), this.redaction);
       const redactedRecord = asRecord(redactedEvent);
       if (!redactedRecord) {
         throw new TypeError("Evidence event must be a structured object.");
       }
-      const line = `${JSON.stringify({ ...redactedRecord, eventId, timestamp })}\n`;
+      const suppliedActor = ownDataProperty(event, "actor");
+      const actor =
+        suppliedActor === "automation" ||
+        suppliedActor === "model" ||
+        suppliedActor === "operator" ||
+        suppliedActor === "system"
+          ? suppliedActor
+          : typeValue.startsWith("model.")
+            ? "model"
+            : typeValue.startsWith("operator.")
+              ? "operator"
+              : typeValue.startsWith("control.")
+                ? "system"
+                : "automation";
+      const ownerEpochValue = ownDataProperty(event, "ownerEpoch");
+      const ownerEpoch =
+        Number.isSafeInteger(ownerEpochValue) && Number(ownerEpochValue) >= 0
+          ? Number(ownerEpochValue)
+          : 0;
+      const correlationIdValue = ownDataProperty(event, "correlationId");
+      const correlationId =
+        typeof correlationIdValue === "string" && correlationIdValue.trim()
+          ? correlationIdValue
+          : runIdValue;
+      const normalized: Record<string, RedactedValue> = {
+        ...redactedRecord,
+        schemaVersion: "1.0.0",
+        eventId,
+        sequence: nextSequence,
+        timestamp,
+        runId: runIdValue,
+        correlationId,
+        actor,
+        ownerEpoch,
+        type: typeValue,
+      };
+      delete normalized.kind;
+      const persisted = PersistedAuditEventSchema.parse(normalized);
+      const line = `${JSON.stringify(persisted)}\n`;
       const bytes = Buffer.from(line, "utf8");
       if (bytes.byteLength > this.maxEventBytes) {
         throw new RangeError("Redacted evidence event exceeds maxEventBytes.");
@@ -661,6 +841,7 @@ export class EvidenceWriter {
         if (result.bytesWritten !== bytes.byteLength) {
           throw new Error("Evidence event append was incomplete.");
         }
+        this.nextSequenceByRun.set(runIdValue, nextSequence + 1);
         return {
           eventId,
           relativePath: output.relative,

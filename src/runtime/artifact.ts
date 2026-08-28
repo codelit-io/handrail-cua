@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 
 import {
+  type AppBinding,
+  type ArtifactApproval,
+  ArtifactApprovalSchema,
   type AtomicPredicate,
   type CapabilityArtifact,
   type CapabilityArtifactDraft,
@@ -13,6 +16,8 @@ import {
   ScalarValueSchema,
   type Step,
   type TargetCandidate,
+  type TargetSpec,
+  TargetSpecSchema,
   type ValueExpression,
 } from "../domain/schema.js";
 
@@ -87,6 +92,20 @@ export class ArtifactCompilationError extends Error {
     );
     this.name = "ArtifactCompilationError";
     this.issues = issues;
+  }
+}
+
+export class ArtifactApprovalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArtifactApprovalError";
+  }
+}
+
+export class TargetOverrideReviewError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TargetOverrideReviewError";
   }
 }
 
@@ -173,6 +192,116 @@ export function computeArtifactDigest(
 export function verifyArtifactDigest(input: unknown): input is CapabilityArtifact {
   const parsed = CapabilityArtifactSchema.safeParse(input);
   return parsed.success && parsed.data.digest === computeArtifactDigest(parsed.data);
+}
+
+/** Validate a trusted catalog approval against immutable artifact identity and current time. */
+export function assertArtifactApproval(
+  artifact: CapabilityArtifact,
+  input: unknown,
+  now: Date,
+): ArtifactApproval {
+  const parsed = ArtifactApprovalSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ArtifactApprovalError("Artifact approval failed its strict schema.");
+  }
+  if (!Number.isFinite(now.getTime())) {
+    throw new ArtifactApprovalError("Artifact approval validation time is invalid.");
+  }
+  const approval = parsed.data;
+  if (
+    approval.artifactId !== artifact.id ||
+    approval.revision !== artifact.revision ||
+    approval.digest !== artifact.digest
+  ) {
+    throw new ArtifactApprovalError(
+      "Artifact approval does not match the artifact ID, revision, and digest.",
+    );
+  }
+  const approvedAt = new Date(approval.approvedAt).getTime();
+  if (approvedAt > now.getTime()) {
+    throw new ArtifactApprovalError("Artifact approval time is in the future.");
+  }
+  if (approval.expiresAt !== undefined) {
+    const expiresAt = new Date(approval.expiresAt).getTime();
+    if (expiresAt <= approvedAt) {
+      throw new ArtifactApprovalError("Artifact approval expires before it becomes valid.");
+    }
+    if (expiresAt <= now.getTime()) {
+      throw new ArtifactApprovalError("Artifact approval has expired.");
+    }
+  }
+  return deepFreeze(approval, new WeakSet<object>());
+}
+
+/** Domain-separated digest for one reviewed target specification. */
+export function computeTargetDigest(input: unknown): string {
+  const target = TargetSpecSchema.parse(input);
+  return createHash("sha256")
+    .update("handrail-target-v1\0")
+    .update(canonicalStringify(target))
+    .digest("hex");
+}
+
+/**
+ * Merge only target overrides whose trusted binding review matches both the
+ * immutable artifact target and its exact replacement.
+ */
+export function bindReviewedTargetOverrides(
+  artifact: CapabilityArtifact,
+  binding: AppBinding,
+  now: Date,
+): Record<string, TargetSpec> {
+  if (!Number.isFinite(now.getTime())) {
+    throw new TargetOverrideReviewError("Target override review validation time is invalid.");
+  }
+  const overrides = Object.entries(binding.targetOverrides);
+  const reviews = binding.targetOverrideReviews ?? {};
+  const targets: Record<string, TargetSpec> = { ...artifact.targets };
+  for (const [targetName, override] of overrides) {
+    const base = artifact.targets[targetName];
+    if (!base) {
+      throw new TargetOverrideReviewError(
+        `Target override ${targetName} does not reference an artifact target.`,
+      );
+    }
+    const review = reviews[targetName];
+    if (!review) {
+      throw new TargetOverrideReviewError(
+        `Target override ${targetName} has no digest-bound review record.`,
+      );
+    }
+    if (
+      review.baseTargetDigest !== computeTargetDigest(base) ||
+      review.overrideTargetDigest !== computeTargetDigest(override)
+    ) {
+      throw new TargetOverrideReviewError(
+        `Target override ${targetName} does not match its reviewed target digests.`,
+      );
+    }
+    const reviewedAt = new Date(review.reviewedAt).getTime();
+    if (!Number.isFinite(reviewedAt) || reviewedAt > now.getTime()) {
+      throw new TargetOverrideReviewError(
+        `Target override ${targetName} has an invalid or future review timestamp.`,
+      );
+    }
+    if (review.expiresAt !== undefined) {
+      const expiresAt = new Date(review.expiresAt).getTime();
+      if (!Number.isFinite(expiresAt) || expiresAt <= reviewedAt || expiresAt <= now.getTime()) {
+        throw new TargetOverrideReviewError(
+          `Target override ${targetName} has an invalid or expired review.`,
+        );
+      }
+    }
+    targets[targetName] = override;
+  }
+  for (const targetName of Object.keys(reviews)) {
+    if (!(targetName in binding.targetOverrides)) {
+      throw new TargetOverrideReviewError(
+        `Target override review ${targetName} has no corresponding override.`,
+      );
+    }
+  }
+  return targets;
 }
 
 function issue(code: ArtifactLintCode, path: string, message: string): ArtifactLintIssue {

@@ -1,5 +1,50 @@
+import type { EffectClass } from "../domain/schema.js";
 import type { ControlGrant, ControlSnapshot } from "../runtime/control.js";
 import type { ActionReceipt, SurfaceObservation, SurfaceSession } from "../surface/types.js";
+
+export type OperatorPolicyAction =
+  | "activate_coordinate"
+  | "type"
+  | "press_key"
+  | "capture_evidence";
+
+/**
+ * Audit-safe context supplied immediately before an operator action can reach
+ * the SurfaceAdapter. Raw typed values and the opaque control token are never
+ * exposed to the authorization hook.
+ */
+export interface OperatorAuthorizationContext {
+  readonly requestedAt: string;
+  readonly runId: string;
+  readonly capability: string;
+  readonly currentStep: string;
+  readonly action: OperatorPolicyAction;
+  readonly effect: EffectClass;
+  readonly session: SurfaceSession;
+  readonly sessionId: string;
+  readonly ownerEpoch: number;
+  readonly operatorId: string;
+  readonly operatorLeaseExpiresAt: string;
+  readonly details: Readonly<Record<string, unknown>>;
+}
+
+export interface OperatorPolicyGrant {
+  readonly allowed: true;
+  /** Audit-safe policy or approval mode, for example `human_control`. */
+  readonly authorization: string;
+}
+
+export interface OperatorPolicyDenial {
+  readonly allowed: false;
+  readonly code: string;
+  readonly summary: string;
+}
+
+export type OperatorPolicyDecision = OperatorPolicyGrant | OperatorPolicyDenial;
+
+export type OperatorActionAuthorizer = (
+  context: OperatorAuthorizationContext,
+) => OperatorPolicyDecision | Promise<OperatorPolicyDecision>;
 
 export type OperatorAuditAction =
   | "automation_paused"
@@ -11,7 +56,10 @@ export type OperatorAuditAction =
   | "control_returned"
   | "audit_sink_failed";
 
-export interface OperatorAuditEvent {
+export interface OperatorAuditEvent extends Readonly<Record<string, unknown>> {
+  readonly schemaVersion: "1.0.0";
+  readonly eventId: string;
+  readonly type: "operator.audit";
   readonly sequence: number;
   readonly timestamp: string;
   readonly runId: string;
@@ -31,14 +79,24 @@ export interface ResumeCheckpointSignal {
 }
 
 export interface OperatorCapture {
+  readonly schemaVersion: "1.0.0";
   readonly id: string;
   readonly runId: string;
   readonly sessionId: string;
   readonly capturedAt: string;
   readonly sha256: string;
   readonly byteLength: number;
+  readonly mimeType: "image/png";
   readonly screenshotPng: Buffer;
 }
+
+/**
+ * Sink return values are deliberately opaque. The server awaits promises, so a
+ * durable writer may return its native append/write receipt without an adapter
+ * that discards it.
+ */
+export type OperatorAuditSink = (event: OperatorAuditEvent) => unknown;
+export type OperatorCaptureSink = (capture: OperatorCapture) => unknown;
 
 export interface OpenOperatorInterventionInput {
   readonly runId: string;
@@ -99,13 +157,16 @@ export interface OperatorConsoleOptions {
   readonly host?: string;
   readonly port?: number;
   readonly now?: () => Date;
-  readonly auditSink?: (event: OperatorAuditEvent) => Promise<void> | void;
-  readonly captureSink?: (capture: OperatorCapture) => Promise<void> | void;
+  /** Omission denies every operator surface action and evidence capture. */
+  readonly authorizeOperatorAction?: OperatorActionAuthorizer;
+  readonly auditSink?: OperatorAuditSink;
+  readonly captureSink?: OperatorCaptureSink;
 }
 
 export interface OperatorInterventionHandle {
   readonly runId: string;
   readonly sessionId: string;
+  /** Bearer-capability URL. Display to the assigned operator; never persist or audit it. */
   readonly url: string;
   state: () => OperatorConsoleState;
   audit: () => readonly OperatorAuditEvent[];

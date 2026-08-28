@@ -24,11 +24,15 @@ import type {
   SurfaceSession,
 } from "../surface/types.js";
 import {
+  ArtifactApprovalError,
   ArtifactBindingError,
   ArtifactCompilationError,
+  assertArtifactApproval,
   assertValidArtifact,
   bindArtifactInputs,
+  bindReviewedTargetOverrides,
   bindValueExpression,
+  TargetOverrideReviewError,
   validateArtifactOutputs,
 } from "./artifact.js";
 import { type ControlCoordinator, ControlError, type ControlGrant } from "./control.js";
@@ -47,6 +51,7 @@ import {
 const ZERO_MODEL_CALLS = 0 as const;
 const DEFAULT_RUN_TIMEOUT_MS = 2 * 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
+const ENTRYPOINT_OPERATION_ID = "replay-entrypoint";
 
 export type ReplayRecoverableKind =
   | "target_not_found"
@@ -66,6 +71,8 @@ export class RecoverableReplayError extends Error {
 
 export interface ReplayInvocation {
   readonly artifact: unknown;
+  /** Trusted catalog record. Strict engines require and validate it before surface creation. */
+  readonly artifactApproval?: unknown;
   readonly binding: unknown;
   readonly inputs: Readonly<Record<string, unknown>>;
   /** Optional exact-origin URL for tenant/scenario query parameters; its route must match entrypoint. */
@@ -132,6 +139,8 @@ export interface ReplayEngineOptions {
   readonly runTimeoutMs?: number;
   readonly closeSessionOnFinish?: boolean;
   readonly surfaceSentinels?: readonly ReplaySurfaceSentinel[];
+  /** `strict` requires a valid artifact approval; default `non_strict` preserves discovery/demo use. */
+  readonly artifactApprovalMode?: "strict" | "non_strict";
   /**
    * Optional same-session handoff bridge. It may pause/claim/return control once per run.
    * Without this callback replay preserves the default typed needs_intervention result.
@@ -146,6 +155,7 @@ interface PreflightSuccess {
   readonly artifact: CapabilityArtifact;
   readonly binding: ReturnType<typeof AppBindingSchema.parse>;
   readonly inputs: Readonly<Record<string, ScalarValue>>;
+  readonly targets: Record<string, TargetSpec>;
   readonly policy: PolicyStack;
   readonly entryUrl: string;
 }
@@ -170,6 +180,7 @@ interface ExecutionState {
   readonly bindingOrigin: string;
   readonly session: SurfaceSession;
   readonly approval?: BoundApproval;
+  readonly consumedBoundApprovalIds: Set<string>;
   readonly resolveSecret?: (name: string) => ScalarValue;
   sessionId: string;
   grant: ControlGrant;
@@ -217,6 +228,40 @@ function validDate(clock: () => Date): Date {
 
 function safeIdentifier(value: string | undefined, fallback: string): string {
   return value && /^[A-Za-z][A-Za-z0-9._-]{1,127}$/u.test(value) ? value : fallback;
+}
+
+function snapshotBoundApproval(approval: BoundApproval): BoundApproval {
+  return Object.freeze({
+    id: approval.id,
+    runId: approval.runId,
+    operationId: approval.operationId,
+    ...(approval.command !== undefined ? { command: approval.command } : {}),
+    ...(approval.action !== undefined ? { action: approval.action } : {}),
+    effect: approval.effect,
+    origin: approval.origin,
+    route: approval.route,
+    expiresAt:
+      approval.expiresAt instanceof Date ? approval.expiresAt.getTime() : approval.expiresAt,
+    ...(approval.capabilityDigest !== undefined
+      ? { capabilityDigest: approval.capabilityDigest }
+      : {}),
+  });
+}
+
+function consumeBoundApproval(
+  authorization: "policy" | "bound_approval" | "human_control",
+  approval: BoundApproval | undefined,
+  consumedApprovalIds: Set<string>,
+): void {
+  if (authorization !== "bound_approval") return;
+  if (!approval || consumedApprovalIds.has(approval.id)) {
+    throw new PolicyDeniedError({
+      allowed: false,
+      code: "APPROVAL_INVALID",
+      summary: "The bound approval has already authorized one operation in this replay.",
+    });
+  }
+  consumedApprovalIds.add(approval.id);
 }
 
 function elapsedMs(startedAt: Date, finishedAt: Date): number {
@@ -567,6 +612,7 @@ export class ReplayEngine {
   readonly #runTimeoutMs: number;
   readonly #closeSessionOnFinish: boolean;
   readonly #surfaceSentinels: readonly ReplaySurfaceSentinel[];
+  readonly #artifactApprovalMode: "strict" | "non_strict";
   readonly #onIntervention?: ReplayEngineOptions["onIntervention"];
 
   constructor(options: ReplayEngineOptions) {
@@ -586,6 +632,14 @@ export class ReplayEngine {
     this.#runTimeoutMs = options.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
     this.#closeSessionOnFinish = options.closeSessionOnFinish ?? true;
     this.#surfaceSentinels = options.surfaceSentinels ?? [];
+    if (
+      options.artifactApprovalMode !== undefined &&
+      options.artifactApprovalMode !== "strict" &&
+      options.artifactApprovalMode !== "non_strict"
+    ) {
+      throw new TypeError("artifactApprovalMode must be strict or non_strict.");
+    }
+    this.#artifactApprovalMode = options.artifactApprovalMode ?? "non_strict";
     this.#onIntervention = options.onIntervention;
     if (this.#runTimeoutMs < 100 || this.#runTimeoutMs > 30 * 60_000) {
       throw new RangeError("runTimeoutMs must be between 100ms and 30 minutes.");
@@ -595,7 +649,10 @@ export class ReplayEngine {
   async run(invocation: ReplayInvocation): Promise<RunResult> {
     const startedAt = validDate(this.#now);
     const runId = safeIdentifier(invocation.runId, `replay-${randomUUID()}`);
-    const preflight = this.#preflight(invocation);
+    const boundApproval = invocation.approval
+      ? snapshotBoundApproval(invocation.approval)
+      : undefined;
+    const preflight = this.#preflight(invocation, startedAt);
     if (!preflight.ok) {
       return {
         status: "failed",
@@ -611,22 +668,29 @@ export class ReplayEngine {
       };
     }
 
-    const { artifact, binding, inputs, policy, entryUrl } = preflight;
+    const { artifact, binding, inputs, targets, policy, entryUrl } = preflight;
+    const consumedBoundApprovalIds = new Set<string>();
     let sessionId = "session-pending";
     let grant: ControlGrant | undefined;
     let state: ExecutionState | undefined;
     try {
       // Policy is checked before session creation, so a denied entrypoint never touches a surface.
-      enforcePolicy(policy, {
+      const entryAuthorization = enforcePolicy(policy, {
         url: entryUrl,
         command: "navigate",
         effect: "read",
         actor: "replay",
         runId,
+        operationId: ENTRYPOINT_OPERATION_ID,
         capabilityDigest: artifact.digest,
-        ...(invocation.approval ? { approval: invocation.approval } : {}),
+        ...(boundApproval ? { approval: boundApproval } : {}),
         now: validDate(this.#now),
       });
+      consumeBoundApproval(
+        entryAuthorization.authorization,
+        boundApproval,
+        consumedBoundApprovalIds,
+      );
 
       const session = await this.#surface.createSession(binding);
       sessionId = session.id;
@@ -641,18 +705,18 @@ export class ReplayEngine {
       });
       await this.#surface.navigate(sessionId, entryUrl, grant);
       const observation = await this.#surface.observe(sessionId);
-      const effectiveTargets = { ...artifact.targets, ...binding.targetOverrides };
       state = {
         runId,
         artifact,
         inputs,
-        targets: effectiveTargets,
+        targets,
         outputs: {},
         stepOutputs: {},
         policy,
         bindingOrigin: binding.origin,
         session,
-        ...(invocation.approval ? { approval: invocation.approval } : {}),
+        ...(boundApproval ? { approval: boundApproval } : {}),
+        consumedBoundApprovalIds,
         ...(this.#resolveSecret ? { resolveSecret: this.#resolveSecret } : {}),
         sessionId,
         grant,
@@ -810,7 +874,7 @@ export class ReplayEngine {
     }
   }
 
-  #preflight(invocation: ReplayInvocation): PreflightResult {
+  #preflight(invocation: ReplayInvocation, now: Date): PreflightResult {
     let artifact: CapabilityArtifact;
     try {
       artifact = assertValidArtifact(invocation.artifact);
@@ -837,8 +901,17 @@ export class ReplayEngine {
     }
 
     try {
+      if (this.#artifactApprovalMode === "strict" && invocation.artifactApproval === undefined) {
+        throw new ArtifactApprovalError(
+          "Strict replay requires a trusted artifact approval record.",
+        );
+      }
+      if (invocation.artifactApproval !== undefined) {
+        assertArtifactApproval(artifact, invocation.artifactApproval, now);
+      }
       const binding = AppBindingSchema.parse(invocation.binding);
       const inputs = bindArtifactInputs(artifact, invocation.inputs);
+      const targets = bindReviewedTargetOverrides(artifact, binding, now);
       if (
         artifact.compatibility.product.vendor !== binding.product.vendor ||
         artifact.compatibility.product.product !== binding.product.product
@@ -860,11 +933,14 @@ export class ReplayEngine {
         artifact,
         binding,
         inputs,
+        targets,
         policy,
         entryUrl: invocationEntryUrl(invocation.targetUrl, binding.origin, route),
       };
     } catch (error: unknown) {
       const inputError = error instanceof ArtifactBindingError;
+      const approvalError = error instanceof ArtifactApprovalError;
+      const targetOverrideError = error instanceof TargetOverrideReviewError;
       return {
         ok: false,
         artifactId: artifact.id,
@@ -874,7 +950,11 @@ export class ReplayEngine {
             code: inputError ? "INPUT_INVALID" : "ARTIFACT_INVALID",
             message: inputError
               ? "Replay inputs failed the artifact contract."
-              : "The app binding is invalid or incompatible with the artifact.",
+              : approvalError
+                ? "Replay requires a current approval for this exact artifact."
+                : targetOverrideError
+                  ? "A target override is missing its exact trusted review."
+                  : "The app binding is invalid or incompatible with the artifact.",
             retryable: false,
             observed: messageOf(error),
           },
@@ -1223,18 +1303,20 @@ export class ReplayEngine {
   #authorize(step: Step, state: ExecutionState): void {
     const url =
       step.command === "navigate" ? pathUrl(state.bindingOrigin, step.route) : state.currentUrl;
-    enforcePolicy(state.policy, {
+    const decision = enforcePolicy(state.policy, {
       url,
       command: step.command,
       effect: step.effect,
       actor: "replay",
       runId: state.runId,
+      operationId: step.id,
       capabilityDigest: state.artifact.digest,
       sessionId: state.sessionId,
       ownerEpoch: state.grant.epoch,
       ...(state.approval ? { approval: state.approval } : {}),
       now: validDate(this.#now),
     });
+    consumeBoundApproval(decision.authorization, state.approval, state.consumedBoundApprovalIds);
   }
 
   #target(state: ExecutionState, targetId: string): TargetSpec {

@@ -7,6 +7,7 @@ import {
   type CapabilityArtifactDraft,
   type CapabilityPolicyRequirements,
   type EffectClass,
+  EffectClassSchema,
   IdentifierSchema,
   type InputSpec,
   InputSpecSchema,
@@ -31,6 +32,7 @@ import type {
   PredicateResult,
   SurfaceAdapter,
   SurfaceObservation,
+  SurfaceSession,
 } from "../surface/types.js";
 import {
   ArtifactBindingError,
@@ -56,11 +58,19 @@ const DEFAULT_RECOVERY_DELAY_MS = 300;
 const MAX_RESULT_MESSAGE = 1_600;
 
 type Policy = PolicyStack | readonly PolicyLayer[];
-type InterventionReason = InterventionView["reason"];
+export type InterventionReason = InterventionView["reason"];
 
 export interface DiscoveryOutputBinding {
   readonly source?: "text" | "value";
   readonly transforms?: readonly ("trim" | "currency_to_number" | "number")[];
+}
+
+export interface DiscoveryActivationPolicy {
+  /** Exact user-visible identity from the fresh observation, never a CSS selector. */
+  readonly role: string;
+  readonly name: string;
+  readonly effect: EffectClass;
+  readonly idempotency: "idempotent" | "non_idempotent";
 }
 
 export interface DiscoveryArtifactSpec {
@@ -76,6 +86,8 @@ export interface DiscoveryArtifactSpec {
   /** Durable, reviewed targets used by outcome predicates but not visited in the successful run. */
   readonly staticTargets?: Readonly<Record<string, TargetSpec>>;
   readonly outputBindings?: Readonly<Record<string, DiscoveryOutputBinding>>;
+  /** Every activatable control must be explicitly classified before the model may choose it. */
+  readonly activationPolicies?: readonly DiscoveryActivationPolicy[];
   readonly versionRange?: string;
   readonly requiredSurfaceCapabilities?: readonly SurfaceCapability[];
   readonly policyRequirements?: CapabilityPolicyRequirements;
@@ -137,8 +149,30 @@ export interface DiscoveryEngineOptions {
   readonly control: ControlCoordinator;
   readonly policy: Policy;
   readonly evidence?: EvidenceWriter;
+  /** Optional same-session handoff bridge. One intervention may be resumed per discovery run. */
+  readonly onIntervention?: (
+    context: DiscoveryInterventionContext,
+  ) => Promise<DiscoveryInterventionResolution>;
   readonly now?: () => Date;
   readonly sleep?: (durationMs: number) => Promise<void>;
+}
+
+export interface DiscoveryInterventionContext {
+  readonly runId: string;
+  readonly capabilityId: string;
+  readonly session: SurfaceSession;
+  readonly reason: InterventionReason;
+  readonly summary: string;
+  readonly automationGrant: ControlGrant;
+  readonly observation: SurfaceObservation;
+  readonly intervention: InterventionView;
+}
+
+export interface DiscoveryInterventionResolution {
+  readonly sessionId: string;
+  readonly automationGrant: ControlGrant;
+  readonly observation: SurfaceObservation;
+  readonly checkpoint: { readonly passed: boolean; readonly observed: string };
 }
 
 export interface DiscoveryResultBase {
@@ -178,6 +212,7 @@ interface MutableRun {
   readonly runId: string;
   readonly startedAtMs: number;
   readonly sessionId: string;
+  readonly session: SurfaceSession;
   grant: ControlGrant;
   observation: SurfaceObservation;
   readonly inputs: Record<string, unknown>;
@@ -189,6 +224,7 @@ interface MutableRun {
   readonly pendingActivations: RecordedActivation[];
   readonly evidence: EvidenceRef[];
   recoveries: number;
+  handledInterventions: number;
   sequence: number;
 }
 
@@ -243,8 +279,28 @@ function decisionCommand(decision: ModelDecision): RuntimeCommand | undefined {
   }
 }
 
-function decisionEffect(decision: ModelDecision): EffectClass {
-  return decision.kind === "set_value" ? "reversible_write" : "read";
+function activationPolicyFor(
+  element: ObservedElement | undefined,
+  artifact: DiscoveryArtifactSpec,
+): DiscoveryActivationPolicy | undefined {
+  if (!element?.role || !element.name) return undefined;
+  return artifact.activationPolicies?.find(
+    (policy) => policy.role === element.role && policy.name === element.name,
+  );
+}
+
+function decisionEffect(
+  decision: ModelDecision,
+  element: ObservedElement | undefined,
+  artifact: DiscoveryArtifactSpec,
+): EffectClass {
+  if (decision.kind === "set_value") return "reversible_write";
+  if (decision.kind === "activate" || decision.kind === "activate_coordinate") {
+    // Unclassified activation is treated as irreversible. Discovery has no implicit approval,
+    // so the policy stack blocks it instead of guessing that a button is safe.
+    return activationPolicyFor(element, artifact)?.effect ?? "commit";
+  }
+  return "read";
 }
 
 function targetSignature(element: ObservedElement): string {
@@ -379,6 +435,7 @@ export class DiscoveryEngine {
   readonly #control: ControlCoordinator;
   readonly #policy: Policy;
   readonly #evidence: EvidenceWriter | undefined;
+  readonly #onIntervention: DiscoveryEngineOptions["onIntervention"];
   readonly #now: () => Date;
   readonly #sleep: (durationMs: number) => Promise<void>;
 
@@ -388,6 +445,7 @@ export class DiscoveryEngine {
     this.#control = options.control;
     this.#policy = options.policy;
     this.#evidence = options.evidence;
+    this.#onIntervention = options.onIntervention;
     this.#now = options.now ?? (() => new Date());
     this.#sleep =
       options.sleep ?? ((durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)));
@@ -409,6 +467,7 @@ export class DiscoveryEngine {
         runId,
         startedAtMs: this.#now().getTime(),
         sessionId: session.id,
+        session,
         grant,
         observation: undefined as unknown as SurfaceObservation,
         inputs: { ...request.inputs },
@@ -420,6 +479,7 @@ export class DiscoveryEngine {
         pendingActivations: [],
         evidence: [],
         recoveries: 0,
+        handledInterventions: 0,
         sequence: 0,
       };
       orphanSessionId = undefined;
@@ -542,6 +602,21 @@ export class DiscoveryEngine {
       IdentifierSchema.parse(name);
       TargetSpecSchema.parse(target);
     }
+    const activationKeys = new Set<string>();
+    for (const policy of request.artifact.activationPolicies ?? []) {
+      if (!policy.role.trim() || !policy.name.trim()) {
+        throw new TypeError("Discovery activation policies require an exact role and name.");
+      }
+      EffectClassSchema.parse(policy.effect);
+      if (policy.idempotency !== "idempotent" && policy.idempotency !== "non_idempotent") {
+        throw new TypeError("Discovery activation policy idempotency is invalid.");
+      }
+      const key = `${policy.role}\u0000${policy.name}`;
+      if (activationKeys.has(key)) {
+        throw new TypeError("Discovery activation policies cannot duplicate a control identity.");
+      }
+      activationKeys.add(key);
+    }
     for (const sentinel of request.sentinels ?? []) {
       if ("code" in sentinel) IdentifierSchema.parse(sentinel.code);
       if (!(sentinel.pattern instanceof RegExp)) {
@@ -619,7 +694,9 @@ export class DiscoveryEngine {
         throw this.#fault(signal.code, signal.message, signal.retryable ?? false, run.evidence);
       }
       if (signal?.kind === "intervention") {
-        return this.#intervene(run, signal.reason, signal.summary);
+        const intervention = await this.#intervene(run, request, signal.reason, signal.summary);
+        if (intervention) return intervention;
+        continue;
       }
       if (signal?.kind === "recoverable") {
         run.recoveries += 1;
@@ -648,7 +725,9 @@ export class DiscoveryEngine {
         response = await this.#planner.decide({
           goal: request.goal,
           inputs: { ...run.inputs },
+          inputSpecs: request.artifact.inputs,
           outputs: { ...run.outputs },
+          outputSpecs: request.artifact.outputs,
           observation: run.observation,
           allowedActions,
         });
@@ -685,7 +764,14 @@ export class DiscoveryEngine {
       });
 
       if (decision.kind === "request_help") {
-        return this.#intervene(run, reasonFromModel(decision.reason), decision.summary);
+        const intervention = await this.#intervene(
+          run,
+          request,
+          reasonFromModel(decision.reason),
+          decision.summary,
+        );
+        if (intervention) return intervention;
+        continue;
       }
       if (decision.kind === "finish") {
         return this.#finish(run, request, binding, entrypointRoute);
@@ -738,6 +824,22 @@ export class DiscoveryEngine {
     const outputsComplete = Object.keys(request.artifact.outputs).every(
       (outputName) => run.outputs[outputName] !== undefined,
     );
+    const activationEffects = run.observation.elements.flatMap((element) => {
+      const policy = activationPolicyFor(element, request.artifact);
+      return policy ? [policy.effect] : [];
+    });
+    const activationAllowed = activationEffects.some(
+      (effect) =>
+        checkPolicy(this.#policy, {
+          url,
+          command: "activate",
+          effect,
+          actor: "discovery",
+          runId: run.runId,
+          sessionId: run.sessionId,
+          ownerEpoch: run.grant.epoch,
+        }).allowed,
+    );
     const candidates: Array<{
       kind: ModelDecision["kind"];
       command?: RuntimeCommand;
@@ -750,12 +852,15 @@ export class DiscoveryEngine {
         effect: "reversible_write",
         enabled: !outputsComplete && Object.keys(request.artifact.inputs).length > 0,
       },
-      { kind: "activate", command: "activate", effect: "read", enabled: !outputsComplete },
+      {
+        kind: "activate",
+        effect: "read",
+        enabled: !outputsComplete && activationAllowed,
+      },
       {
         kind: "activate_coordinate",
-        command: "activate",
         effect: "read",
-        enabled: !outputsComplete && request.allowCoordinateDiscovery === true,
+        enabled: !outputsComplete && request.allowCoordinateDiscovery === true && activationAllowed,
       },
       { kind: "wait", command: "wait_for", effect: "read", enabled: !outputsComplete },
       {
@@ -799,7 +904,8 @@ export class DiscoveryEngine {
   ): Promise<void> {
     const command = decisionCommand(decision);
     if (!command) throw new Error("A surface decision must have a policy command.");
-    const effect = decisionEffect(decision);
+    const observedElement = elementForDecision(run.observation, decision);
+    const effect = decisionEffect(decision, observedElement, request.artifact);
     const url = routeUrl(binding.origin, run.observation.route);
     enforcePolicy(this.#policy, {
       url,
@@ -811,7 +917,6 @@ export class DiscoveryEngine {
       ownerEpoch: run.grant.epoch,
     });
 
-    const observedElement = elementForDecision(run.observation, decision);
     const inputName =
       decision.kind === "set_value" && decision.value.kind === "input"
         ? decision.value.name
@@ -902,18 +1007,31 @@ export class DiscoveryEngine {
       });
     } else if (decision.kind === "activate" || decision.kind === "activate_coordinate") {
       if (!targetName) throw new Error("Activation target was not compiled.");
+      const activationPolicy = activationPolicyFor(observedElement, request.artifact);
+      if (!activationPolicy) {
+        throw this.#fault(
+          "POLICY_DENIED",
+          "Discovery refused to compile an activation without an explicit effect policy.",
+          false,
+          run.evidence,
+        );
+      }
+      const retryable =
+        activationPolicy.effect !== "commit" && activationPolicy.idempotency === "idempotent";
       run.steps.push({
         id: `step-${String(run.steps.length + 1).padStart(2, "0")}-activate-${slug(targetName, "action")}`,
-        description: "Activate the observed read-only control.",
+        description: `Activate the observed ${activationPolicy.effect} control.`,
         command: "activate",
         target: targetName,
-        effect: "read",
-        idempotency: "idempotent",
+        effect: activationPolicy.effect,
+        idempotency: activationPolicy.idempotency,
         timeoutMs: 7_500,
         retry: {
-          maxAttempts: 2,
-          delayMs: 200,
-          retryOn: ["target_not_found", "postcondition_timeout", "known_transient"],
+          maxAttempts: retryable ? 2 : 1,
+          delayMs: retryable ? 200 : 0,
+          retryOn: retryable
+            ? ["target_not_found", "postcondition_timeout", "known_transient"]
+            : [],
         },
         postcondition: { kind: "route_matches", route: run.observation.route },
       });
@@ -1199,9 +1317,12 @@ export class DiscoveryEngine {
 
   async #intervene(
     run: MutableRun,
+    request: DiscoveryRequest,
     reason: InterventionReason,
     summary: string,
-  ): Promise<DiscoveryResult> {
+  ): Promise<DiscoveryResult | undefined> {
+    const previousGrant = run.grant;
+    const previousObservationId = run.observation.id;
     this.#control.requestPause(run.grant, summary);
     const paused = await this.#control.quiesceAutomation(run.grant);
     const intervention: InterventionView = {
@@ -1225,6 +1346,67 @@ export class DiscoveryEngine {
       createdAt: this.#now().toISOString(),
     };
     await this.#emit(run, "intervention.created", { intervention, ownerEpoch: paused.epoch });
+    if (this.#onIntervention && run.handledInterventions < 1) {
+      const resolution = await this.#onIntervention({
+        runId: run.runId,
+        capabilityId: request.artifact.id,
+        session: run.session,
+        reason,
+        summary,
+        automationGrant: previousGrant,
+        observation: run.observation,
+        intervention,
+      });
+      if (
+        resolution.sessionId !== run.sessionId ||
+        resolution.automationGrant.sessionId !== run.sessionId ||
+        resolution.observation.sessionId !== run.sessionId
+      ) {
+        throw this.#fault(
+          "CONTROL_LOST",
+          "Discovery handoff attempted to replace the live session.",
+          false,
+          run.evidence,
+        );
+      }
+      let previousGrantInvalid = false;
+      try {
+        this.#control.assertGrant(previousGrant);
+      } catch (error: unknown) {
+        previousGrantInvalid = error instanceof ControlError && error.code === "CONTROL_LOST";
+      }
+      if (!previousGrantInvalid) {
+        throw this.#fault(
+          "CONTROL_LOST",
+          "Discovery handoff returned without revoking the prior automation lease.",
+          false,
+          run.evidence,
+        );
+      }
+      this.#control.assertGrant(resolution.automationGrant, "automation");
+      if (
+        resolution.automationGrant.epoch <= previousGrant.epoch ||
+        resolution.observation.id === previousObservationId ||
+        !resolution.checkpoint.passed
+      ) {
+        throw this.#fault(
+          "POSTCONDITION_FAILED",
+          "Discovery handoff did not return a newer lease, fresh observation, and passing checkpoint.",
+          false,
+          run.evidence,
+        );
+      }
+      run.grant = resolution.automationGrant;
+      run.observation = resolution.observation;
+      run.handledInterventions += 1;
+      await this.#emit(run, "discovery.intervention.resumed", {
+        priorOwnerEpoch: previousGrant.epoch,
+        newOwnerEpoch: resolution.automationGrant.epoch,
+        observationId: resolution.observation.id,
+        checkpointPassed: true,
+      });
+      return undefined;
+    }
     await this.#emit(run, "run.completed", {
       status: "needs_intervention",
       modelCalls: this.#planner.callCount,

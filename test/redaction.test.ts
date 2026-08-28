@@ -226,6 +226,19 @@ describe("sanitized evidence", () => {
       records.every((record) => record.password === SECRET_REDACTION),
       true,
     );
+    assert.equal(
+      records.every(
+        (record) =>
+          record.schemaVersion === "1.0.0" &&
+          record.runId === "run-001" &&
+          record.correlationId === "run-001" &&
+          record.actor === "automation" &&
+          record.ownerEpoch === 0 &&
+          record.type === "action.receipt" &&
+          Object.hasOwn(record, "kind") === false,
+      ),
+      true,
+    );
     const ref = await writer.eventLogRef();
     assert.equal(ref.kind, "event_log");
     assert.equal(ref.byteLength, Buffer.byteLength(text));
@@ -403,6 +416,7 @@ describe("sanitized evidence", () => {
       decisionId: "decision-projection",
       observationId: "observation-projection",
       kind: "finish",
+      reasonCode: "planner_finish",
     });
     assert.deepEqual((records[2]?.decision as Record<string, unknown> | undefined)?.value, {
       kind: "literal",
@@ -429,6 +443,10 @@ describe("sanitized evidence", () => {
       phase: "replay",
       retryable: false,
       evidence: [],
+      diagnostic: {
+        expectedCategory: "declared_step_postcondition",
+        observedCategory: "postcondition_not_satisfied",
+      },
     });
     assert.deepEqual(records[8]?.predicate, {
       kind: "target_value_equals",

@@ -22,12 +22,17 @@ What it does **not** demonstrate: an LLM choosing actions. The scripted planner 
 
 ## Qualifying live Ollama run
 
-The live planner uses Ollama's native structured-output endpoint. It receives goal, typed inputs, captured outputs, allowed action kinds, and a fresh semantic observation containing current element references. The browser still captures screenshots for evidence and human review, but the default `qwen3:4b` flow does not send screenshots to the model.
+The live planner uses Ollama's native structured-output endpoint. It receives the goal, contract availability/classification metadata, allowed action kinds, and a bounded redacted semantic observation containing current element references. Raw classified input/output values are kept local. The browser still captures screenshots for evidence and human review, but the default `qwen3:4b` flow does not send screenshots to the model.
 
-Start Ollama in a separate terminal if it is not already running:
+In terminal A, start Ollama and leave it running:
 
 ```bash
 ollama serve
+```
+
+In terminal B, pull the model:
+
+```bash
 ollama pull qwen3:4b
 ```
 
@@ -40,11 +45,13 @@ HANDRAIL_HEADLESS=false \
 npm run discover -- \
   --planner live \
   --goal "Look up the member by member number and return the current balance for the Savings account." \
+  --member-id 84721 \
   --run-id assignment-discovery \
   --output work/assignment-discovery
 
 npm run replay -- \
   --artifact work/assignment-discovery/artifact.json \
+  --member-id 26017 \
   --run-id assignment-replay \
   --output work/assignment-replay
 ```
@@ -60,6 +67,7 @@ HANDRAIL_HEADLESS=false \
 npm run demo:live -- \
   --run-id assignment-live \
   --replays 10 \
+  --source-revision "$(git rev-parse HEAD)" \
   --output work/assignment-live-evidence
 ```
 
@@ -93,9 +101,26 @@ The replay qualifies only when it references that exact artifact digest, uses a 
 
 ## Same-session handoff behavior
 
+Run the integrated expiry-to-resume path:
+
+```bash
+npm run replay -- \
+  --artifact evidence/artifacts/member.balance.lookup.v1.json \
+  --artifact-approval evidence/artifacts/member.balance.lookup.v1.approval.json \
+  --member-id 84721 \
+  --scenario session-expired \
+  --handoff \
+  --headed \
+  --run-id evaluator-handoff \
+  --output work/evaluator-handoff
+```
+
+Open the printed `intervention` URL. Claim control, capture the expired state, select **Restore Session** inside the live screenshot, capture the restored state, and choose **Return to automation**. Do not remove the URL fragment before the initial page loads: it contains the one-time bootstrap capability and is cleared automatically after exchange.
+
 When an intervention is opened, the console:
 
 - revokes the current automation grant at an action boundary;
+- requires a random per-intervention capability before exposing state or screenshots;
 - displays a screenshot captured from the existing `SurfaceSession`;
 - issues one opaque, epoch-bound operator claim;
 - accepts click, focused typing, allowlisted keypress, and capture requests only from that claim;
@@ -103,7 +128,7 @@ When an intervention is opened, the console:
 - records redacted audit actions without typed values or claim tokens;
 - resumes only after a fresh observation and orchestration-supplied checkpoint evaluation.
 
-The console is loopback-only and intentionally unauthenticated for this local demo. It is not a remote support product, and it never launches or substitutes a browser session.
+The console is loopback-only and capability-gated for this local demo. The fragment capability is retained only as a SHA-256 digest; the browser exchanges it for a path-scoped, `HttpOnly`, `SameSite=Strict` cookie. This is not workforce identity or a remote support product, and the console never launches or substitutes a browser session.
 
 ## Failure-injection tour
 
@@ -130,6 +155,6 @@ Before sharing a run:
 2. Run `npm run evidence:validate`.
 3. Inspect every screenshot manually.
 4. Confirm events contain no typed secret, claim token, cookie, storage state, authorization header, raw provider response, or local absolute path.
-5. Match artifact and replay digests, session IDs, owner epochs, result status, and file hashes to `evidence/manifest.json`.
+5. Match source/target/runtime provenance, artifact and replay digests, session IDs, owner epochs, result status, and file hashes to `evidence/manifest.json`.
 
 See [QA.md](QA.md) for the full release checklist and stop-ship gates.

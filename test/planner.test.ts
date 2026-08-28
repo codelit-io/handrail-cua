@@ -66,7 +66,16 @@ describe("OpenAI-compatible discovery planner", () => {
     const response = await planner.decide({
       goal: "Look up a synthetic member.",
       inputs: { memberId: "84721" },
+      inputSpecs: {
+        memberId: {
+          description: "Synthetic member number.",
+          classification: "pii",
+          required: true,
+          validator: { kind: "string", minLength: 5, maxLength: 5 },
+        },
+      },
       outputs: {},
+      outputSpecs: {},
       observation: observation(),
       allowedActions: ["set_value", "request_help"],
     });
@@ -76,6 +85,7 @@ describe("OpenAI-compatible discovery planner", () => {
     assert.equal(planner.callCount, 1);
     assert.ok(requestBody);
     assert.equal(JSON.stringify(requestBody).includes("image_url"), false);
+    assert.equal(JSON.stringify(requestBody).includes("84721"), false);
   });
 
   it("rejects a stale model decision before it reaches the surface", async () => {
@@ -110,11 +120,25 @@ describe("OpenAI-compatible discovery planner", () => {
       planner.decide({
         goal: "Test stale rejection.",
         inputs: {},
+        inputSpecs: {},
         outputs: {},
+        outputSpecs: {},
         observation: observation(),
         allowedActions: ["request_help"],
       }),
       /stale or invented observation ID/,
+    );
+  });
+
+  it("fails closed for a remote model endpoint until data egress is explicitly approved", () => {
+    assert.throws(
+      () =>
+        new OpenAiCompatiblePlanner({
+          baseUrl: "https://model.example.test/v1",
+          apiKey: "test-only",
+          model: "fixture",
+        }),
+      /requires allowRemoteDataEgress=true/,
     );
   });
 });

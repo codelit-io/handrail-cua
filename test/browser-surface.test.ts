@@ -111,7 +111,7 @@ describe("browser surface adapter", () => {
       (element) => element.role === "button" && element.name === "Find Member",
     );
     assert.ok(filledButton);
-    await surface.dispatch(
+    const activationReceipt = await surface.dispatch(
       session.id,
       {
         decisionId: "decision-submit",
@@ -121,6 +121,11 @@ describe("browser surface adapter", () => {
         rationale: "Submit the reversible lookup.",
       },
       { observationId: filled.id, inputs: { memberId: "84721" }, grant },
+    );
+    assert.equal(
+      activationReceipt.changedSurface,
+      true,
+      "An iframe-only content transition must count as a changed surface.",
     );
 
     const results = await surface.observe(session.id);

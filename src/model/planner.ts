@@ -1,11 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { type ModelDecision, ModelDecisionSchema } from "../domain/schema.js";
+import {
+  type InputSpec,
+  type ModelDecision,
+  ModelDecisionSchema,
+  type OutputSpec,
+} from "../domain/schema.js";
+import { redactText } from "../runtime/redaction.js";
 import type { SurfaceObservation } from "../surface/types.js";
 
 export interface PlannerRequest {
   goal: string;
   inputs: Record<string, unknown>;
+  inputSpecs: Readonly<Record<string, InputSpec>>;
   outputs: Record<string, unknown>;
+  outputSpecs: Readonly<Record<string, OutputSpec>>;
   observation: SurfaceObservation;
   allowedActions: Array<ModelDecision["kind"]>;
 }
@@ -31,6 +39,8 @@ export interface OpenAiCompatiblePlannerOptions {
   model: string;
   providerName?: string;
   includeScreenshot?: boolean;
+  /** Required for a non-loopback endpoint because page observations may contain regulated data. */
+  allowRemoteDataEgress?: boolean;
   timeoutMs?: number;
   fetchImplementation?: typeof fetch;
 }
@@ -78,29 +88,88 @@ function normalizeOllamaBaseUrl(baseUrl: string): string {
   return parsed.toString().replace(/\/$/u, "");
 }
 
-function modelSafeObservation(observation: SurfaceObservation): Record<string, unknown> {
+function classifiedAvailability(
+  values: Readonly<Record<string, unknown>>,
+  specs: Readonly<Record<string, InputSpec | OutputSpec>>,
+): Record<string, { available: boolean; classification: InputSpec["classification"] }> {
+  return Object.fromEntries(
+    Object.entries(specs).map(([name, spec]) => [
+      name,
+      { available: Object.hasOwn(values, name), classification: spec.classification },
+    ]),
+  );
+}
+
+function sensitiveMarkers(request: PlannerRequest): readonly [string, string][] {
+  const pairs: [string, string][] = [];
+  for (const [name, spec] of Object.entries(request.inputSpecs)) {
+    const value = request.inputs[name];
+    if (spec.classification !== "public" && value !== undefined && value !== null) {
+      pairs.push([String(value), `[${spec.classification.toUpperCase()}:INPUT:${name}]`]);
+    }
+  }
+  for (const [name, spec] of Object.entries(request.outputSpecs)) {
+    const value = request.outputs[name];
+    if (spec.classification !== "public" && value !== undefined && value !== null) {
+      pairs.push([String(value), `[${spec.classification.toUpperCase()}:OUTPUT:${name}]`]);
+    }
+  }
+  return pairs
+    .filter(([value]) => value.length >= 3)
+    .sort(([left], [right]) => right.length - left.length);
+}
+
+function sanitizeModelText(
+  input: string | undefined,
+  markers: readonly [string, string][],
+): string {
+  let output = redactText(input ?? "");
+  for (const [value, marker] of markers) output = output.split(value).join(marker);
+  return output;
+}
+
+function modelSafeObservation(
+  observation: SurfaceObservation,
+  request: PlannerRequest,
+): Record<string, unknown> {
+  const markers = sensitiveMarkers(request);
   return {
     observationId: observation.id,
     route: observation.route,
-    title: observation.title,
+    title: sanitizeModelText(observation.title, markers),
     viewport: observation.viewport,
-    visibleText: observation.visibleText.slice(0, 8_000),
+    visibleText: sanitizeModelText(observation.visibleText.slice(0, 8_000), markers),
     elements: observation.elements.map((element) => ({
       ref: element.ref,
       framePath: element.framePath,
       role: element.role,
-      name: element.name,
-      text: element.text,
-      value: element.value,
+      name: sanitizeModelText(element.name, markers),
+      text: sanitizeModelText(element.text, markers),
+      value: sanitizeModelText(element.value, markers),
       inputType: element.inputType,
       enabled: element.enabled,
       center: {
         x: Number((element.bounds.x + element.bounds.width / 2).toFixed(4)),
         y: Number((element.bounds.y + element.bounds.height / 2).toFixed(4)),
       },
-      context: element.context,
+      context: Object.fromEntries(
+        Object.entries(element.context).map(([key, value]) => [
+          key,
+          typeof value === "string" ? sanitizeModelText(value, markers) : value,
+        ]),
+      ),
     })),
   };
+}
+
+function isLoopbackEndpoint(baseUrl: string): boolean {
+  const hostname = new URL(baseUrl).hostname.toLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname === "::1" ||
+    hostname === "[::1]" ||
+    /^127(?:\.[0-9]{1,3}){3}$/u.test(hostname)
+  );
 }
 
 function extractContent(response: ChatCompletionResponse): string {
@@ -251,10 +320,15 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
 
   constructor(options: OpenAiCompatiblePlannerOptions) {
     this.#baseUrl = normalizeBaseUrl(options.baseUrl);
+    if (!isLoopbackEndpoint(this.#baseUrl) && options.allowRemoteDataEgress !== true) {
+      throw new Error(
+        "A non-loopback model endpoint requires allowRemoteDataEgress=true after data-governance approval.",
+      );
+    }
     this.#apiKey = options.apiKey;
     this.provider = options.providerName ?? "openai-compatible";
     this.model = options.model;
-    this.#includeScreenshot = options.includeScreenshot ?? true;
+    this.#includeScreenshot = options.includeScreenshot ?? false;
     this.#timeoutMs = options.timeoutMs ?? 45_000;
     this.#fetch = options.fetchImplementation ?? fetch;
   }
@@ -290,10 +364,10 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
           type: "text",
           text: JSON.stringify({
             goal: request.goal,
-            inputs: request.inputs,
-            capturedOutputs: request.outputs,
+            inputs: classifiedAvailability(request.inputs, request.inputSpecs),
+            capturedOutputs: classifiedAvailability(request.outputs, request.outputSpecs),
             allowedActions: request.allowedActions,
-            observation: modelSafeObservation(request.observation),
+            observation: modelSafeObservation(request.observation, request),
           }),
         },
       ];
@@ -406,10 +480,10 @@ export class OllamaPlanner implements DiscoveryPlanner {
         role: "user",
         content: JSON.stringify({
           goal: request.goal,
-          invocationInputs: request.inputs,
-          capturedOutputs: request.outputs,
+          invocationInputs: classifiedAvailability(request.inputs, request.inputSpecs),
+          capturedOutputs: classifiedAvailability(request.outputs, request.outputSpecs),
           allowedActions: request.allowedActions,
-          currentObservation: modelSafeObservation(request.observation),
+          currentObservation: modelSafeObservation(request.observation, request),
         }),
       };
       if (this.#includeScreenshot) {

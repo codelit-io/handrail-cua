@@ -454,6 +454,14 @@ function request(overrides: Partial<DiscoveryRequest> = {}): DiscoveryRequest {
           validator: { kind: "number", minimum: 0 },
         },
       },
+      activationPolicies: [
+        {
+          role: "button",
+          name: "Find Member",
+          effect: "read",
+          idempotency: "idempotent",
+        },
+      ],
       outcomes: [],
     },
     ...overrides,
@@ -566,6 +574,93 @@ describe("bounded model-driven discovery", () => {
     assert.equal(result.intervention.sessionId, surface.session.id);
     assert.equal(control.snapshot(surface.session.id).phase, "AWAITING_OPERATOR");
     assert.equal(surface.closed, false);
+  });
+
+  it("cedes and resumes discovery on the same session with a newer automation lease", async () => {
+    const surface = new FakeSurface();
+    const control = new ControlCoordinator();
+    const planner = new FixedPlanner((plannerRequest, callCount) => {
+      const common = {
+        decisionId: `decision-resume-${callCount}`,
+        observationId: plannerRequest.observation.id,
+        rationale: "Exercise the bounded same-session discovery handoff.",
+      };
+      if (callCount === 1) {
+        return {
+          ...common,
+          kind: "request_help",
+          reason: "expired_session",
+          summary: "Restore the synthetic session.",
+        };
+      }
+      const balance = plannerRequest.observation.elements.find((item) => item.role === "cell");
+      const field = plannerRequest.observation.elements.find((item) => item.role === "textbox");
+      const button = plannerRequest.observation.elements.find((item) => item.role === "button");
+      if (balance && plannerRequest.outputs.savingsBalance === undefined) {
+        return { ...common, kind: "extract", elementRef: balance.ref, output: "savingsBalance" };
+      }
+      if (plannerRequest.outputs.savingsBalance !== undefined) {
+        return { ...common, kind: "finish", summary: "Verified output is present." };
+      }
+      if (field?.value !== String(plannerRequest.inputs.memberId)) {
+        return {
+          ...common,
+          kind: "set_value",
+          elementRef: field?.ref ?? "missing",
+          value: { kind: "input", name: "memberId" },
+        };
+      }
+      return { ...common, kind: "activate", elementRef: button?.ref ?? "missing" };
+    });
+    let previousEpoch = 0;
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control,
+      policy,
+      onIntervention: async (context) => {
+        previousEpoch = context.automationGrant.epoch;
+        const operatorGrant = control.claimOperator(context.session.id, "operator-test");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        const observation = await surface.observe();
+        return {
+          sessionId: context.session.id,
+          automationGrant,
+          observation,
+          checkpoint: { passed: true, observed: "Synthetic session restored." },
+        };
+      },
+    }).discover(request());
+
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.sessionId, surface.session.id);
+    assert.ok(control.snapshot(surface.session.id).epoch > previousEpoch);
+  });
+
+  it("blocks an activation that has no explicit effect and idempotency classification", async () => {
+    const surface = new FakeSurface();
+    const planner = new FixedPlanner((plannerRequest) => ({
+      kind: "activate",
+      decisionId: "decision-unclassified-activation",
+      observationId: plannerRequest.observation.id,
+      elementRef: plannerRequest.observation.elements[1]?.ref ?? "missing",
+      rationale: "Attempt an activation omitted from the reviewed policy.",
+    }));
+    const base = request();
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control: new ControlCoordinator(),
+      policy,
+    }).discover({
+      ...base,
+      artifact: { ...base.artifact, activationPolicies: [] },
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "MODEL_INVALID_DECISION");
+    assert.equal(surface.dispatchCount, 0);
   });
 
   it("classifies a declared business outcome before making another model call", async () => {

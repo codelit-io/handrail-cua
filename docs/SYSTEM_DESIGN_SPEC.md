@@ -1,0 +1,324 @@
+# Handrail system design specification
+
+Document status: audited submission baseline, revision 1.2
+
+Source: Interface.ai Computer-Use Automation System take-home, Sections 1-9
+
+Implementation: `codelit-io/handrail-cua`
+Last reviewed: 2026-08-28
+
+This is the canonical engineering specification for the submitted vertical slice. `REPORT.md` is the required short-form rationale; this document records the requirements, assumptions, contracts, state transitions, security boundaries, implementation trace, and acceptance gates used to build and review the system.
+
+## 1. Problem and objectives
+
+Handrail gives an agent a safe execution path for a legacy application that has no API:
+
+1. accept a natural-language goal, target entry point, and typed invocation inputs;
+2. let a real model discover a successful interaction on a live surface;
+3. compile only verified actions into a typed, versioned capability artifact;
+4. replay the artifact in a fresh session without a model in the decision loop;
+5. classify business outcomes, bounded recovery, intervention, and hard failure explicitly;
+6. cede the exact live session to a human and resume under a new ownership epoch; and
+7. retain useful, privacy-safe, tamper-evident run evidence.
+
+The primary quality attributes are safety, determinism, reviewability, debuggability, and honest scope. Throughput and distributed scale are design constraints, not features built for the take-home.
+
+### 1.1 Non-goals
+
+- No real bank, customer record, credential, or regulated production data.
+- No attempt to bypass an available API.
+- No distributed queue, browser fleet, durable cross-process lease, or remote operator service.
+- No native desktop adapter claimed as implemented.
+- No open-ended model recovery during production replay.
+- No arbitrary JavaScript, shell, download, clipboard, upload, or filesystem action vocabulary.
+
+## 2. Requirements baseline
+
+The assignment's must-have sections map to the following system requirements.
+
+| ID | Source | Requirement | Acceptance condition |
+| --- | --- | --- | --- |
+| R-3.1-A | 3.1 | Accept goal and target | CLI accepts bounded `--goal` and exact-origin `--target` inputs. |
+| R-3.1-B | 3.1 | Real LLM observe-decide-act loop | A non-fixture model chooses schema-valid actions against fresh observations of a real Chromium surface. |
+| R-3.1-C | 3.1 | Bounded stop conditions | Step, time, recovery, stale-observation, invalid-decision, and dead-end bounds terminate safely. |
+| R-3.2-A | 3.2 | Typed, serializable capability | Artifact declares version, purpose, inputs, outputs, outcomes, targets, steps, effects, policy, checkpoint, and provenance. |
+| R-3.2-B | 3.2 | Robust control identification | Targets use ordered semantic/contextual candidates, exactly-one matching, fingerprints, and rationale. |
+| R-3.2-C | 3.2 | Reviewable immutability | Canonical content digest and optional trusted approval bind the reviewed artifact content. |
+| R-3.3-A | 3.3 | Zero-model deterministic replay | Replay imports no planner and reports `modelCalls: 0`. |
+| R-3.3-B | 3.3 | Inputs, outputs, and checkpoint | Inputs bind before session creation; outputs validate; each step and the terminal state have predicates. |
+| R-3.3-C | 3.3 | Explicit runtime taxonomy | Return exactly one of success, business outcome, intervention, or debuggable failure. |
+| R-3.3-D | 3.3 | Deliberate exception handling | Known transient states are bounded; not-found is a business outcome; denial, ambiguity, timeout, and app faults stop. |
+| R-3.4-A | 3.4 | Configurable allowlist | Exact origin, route, command, and effect must pass every policy layer immediately before action. |
+| R-3.4-B | 3.4 | Conservative effect handling | Every discovered activation is preclassified; unknown activation defaults to commit and is denied; commit requires exact authority and is not retried. |
+| R-3.4-C | 3.4 | Sensitive-data controls | Values are classified; artifacts use references; logs are projected and redacted; screenshot persistence requires pixel-safety attestation. |
+| R-3.5-A | 3.5 | Structured run evidence | Every persisted JSONL event uses one correlated, ordered audit envelope. |
+| R-3.5-B | 3.5 | Rich failure/intervention signal | Synthetic runs retain screenshots and structured diagnostic categories without arbitrary page text. |
+| R-3.6-A | 3.6 | Detect and route | Discovery and replay can create an intervention with goal/capability, reason, state, step, evidence, session, and epoch. |
+| R-3.6-B | 3.6 | Same-session control | Operator actions address the already-created `SurfaceSession`; no replacement session is permitted. |
+| R-3.6-C | 3.6 | Exclusive resume | Pause, quiesce, claim, act, resume, and return issue monotonically newer leases and require a fresh passing checkpoint. |
+| R-3.6-D | 3.6 | Human-action evidence | Operator actions are policy-authorized, redacted, and written into the run's durable audit log. |
+| R-3.7-A | 3.7 | Surface abstraction | Core flow depends on `SurfaceAdapter`, not Playwright types or selectors. |
+| R-3.7-B | 3.7 | Tenant reuse and drift | Product-family artifact is separated from tenant binding; fingerprints gate compatibility; target overrides require review binding. |
+| R-6-A | 6 | Exact deliverables | Root `README.md`, seven-heading `REPORT.md`, public source, and `/evidence/` are present. |
+| R-6-B | 6 | End-to-end evidence | Bundle contains genuine live discovery, deterministic replay, exception handling, and a demonstrable handoff path. |
+
+## 3. Assumptions and trust boundaries
+
+### 3.1 Explicit assumptions
+
+1. The included application and every displayed record are synthetic. The pixel-safety assertion is valid only for this target.
+2. A vendor product's UI changes slowly enough for reviewed targets to be reusable, but runtime business and session states vary.
+3. The Playwright process, local artifact catalog, policy configuration, and local Ollama process are inside the submitted prototype's trusted host boundary.
+4. A non-loopback model endpoint is outside that boundary. It is rejected unless a caller explicitly records data-governance approval; screenshots remain independently opt-in.
+5. Tenant bindings are control-plane configuration, not model output. A target replacement still requires a digest-bound review record before replay.
+6. An in-memory browser session cannot survive process loss. Handrail reports session loss rather than creating a substitute and pretending continuity.
+7. Loopback is not authentication. The operator console therefore uses a random per-intervention capability token in addition to loopback binding and an opaque, short-lived ownership claim.
+8. Artifact approval and action approval are different: artifact approval authorizes immutable capability content; a bound action approval authorizes one risky operation in one run; a human control grant authorizes an operator for one session epoch.
+
+### 3.2 Data classes
+
+| Class | Example | Artifact | Model request | Persistent evidence |
+| --- | --- | --- | --- | --- |
+| Public | synthetic control label | Allowed when needed | Allowed | Allowed after pattern redaction |
+| Internal | synthetic balance | Output schema/reference only | Availability metadata; value stays local unless remote egress is explicitly approved | Redacted or omitted |
+| PII | member number | Typed input reference only | Availability metadata; known values masked from observations | Redacted |
+| Secret | token, password, cookie | Secret reference only | Never sent as an invocation value | Never persisted |
+
+## 4. Architecture
+
+Handrail is a modular monolith so one process can own the browser context and make handoff continuity testable.
+
+```mermaid
+flowchart LR
+  Caller[CLI or agent caller] --> Coordinator[Run coordinator]
+  Coordinator --> Discovery[Bounded discovery]
+  Coordinator --> Replay[Deterministic replay]
+  Discovery --> Planner[Local or approved model endpoint]
+  Discovery --> Compiler[Artifact compiler and linter]
+  Replay --> Catalog[Artifact plus approval]
+  Discovery --> Surface[SurfaceAdapter]
+  Replay --> Surface
+  Operator[Token-gated operator console] --> Control[Epoch control coordinator]
+  Discovery --> Control
+  Replay --> Control
+  Operator --> Surface
+  Coordinator --> Policy[Policy intersection]
+  Operator --> Policy
+  Coordinator --> Evidence[Immutable redacted evidence]
+  Operator --> Evidence
+```
+
+### 4.1 Component responsibilities
+
+| Component | Owns | Must not own |
+| --- | --- | --- |
+| Planner | One bounded decision from current refs | Browser handles, persistent transcript, replay execution |
+| Discovery engine | Loop bounds, freshness, effect policy, action verification, compilation | Arbitrary action execution or artifact approval |
+| Artifact compiler | Schema, lint, canonical digest, expression binding | Live UI state or credentials |
+| Replay engine | Preflight, target resolution, deterministic steps, outcomes, checkpoints | Planner/model dependency |
+| SurfaceAdapter | Session, perception, target resolution, dispatch, extraction, screenshot | Workflow policy or business taxonomy |
+| Policy | Intersection of platform, binding, and capability constraints | Unioning permissions or inferring intent from UI text |
+| Control coordinator | Exclusive owner, epoch, lease, action serialization | Operator UI or surface creation |
+| Operator console | Same-session manual controls and resume bridge | New target session, policy bypass, durable secret storage |
+| Evidence writer | Projection, redaction, ordered envelope, immutable files | Raw transcript, cookies, storage state, unverified pixels |
+
+## 5. Core contracts
+
+### 5.1 Capability artifact
+
+The artifact is declarative intermediate representation, not a recording of raw clicks and not generated executable code. It contains:
+
+- `schemaVersion`, logical ID, revision, purpose, and canonical digest;
+- product compatibility, required surface capabilities, and fingerprint threshold;
+- typed input/output/outcome contract with data classifications;
+- logical target dictionary with an ordered locator lattice and review rationale;
+- ordered steps with effect, idempotency, timeout, retry policy, and postcondition;
+- terminal success predicate and policy requirements; and
+- discovery provider/model/prompt provenance.
+
+Invocation values use expression nodes such as `{kind: "input", name: "memberId"}`. Raw per-run values and model transcripts are not artifact fields.
+
+### 5.2 App binding and tenant override
+
+`AppBinding` supplies exact origin, named entrypoints, expected product fingerprint, secret-broker references, tenant policy, and optional logical-target replacements. An override cannot change a step, command, effect, input, output, or outcome. Replacing an artifact target requires a review record binding the SHA-256 of both the base and replacement target; unreviewed or mismatched replacements fail preflight before session creation.
+
+### 5.3 Result contract
+
+```text
+succeeded         -> validated outputs + checkpoint evidence
+business_outcome  -> declared outcome code + evidence
+needs_intervention-> contextual intervention + retained session
+failed            -> phase/code/step + safe diagnostic categories + evidence
+```
+
+The branches are mutually exclusive. `MEMBER_NOT_FOUND` is a valid caller-visible outcome, not an internal crash.
+
+### 5.4 Persisted audit event
+
+Every line in `events.redacted.jsonl` has the same required envelope:
+
+```text
+schemaVersion, eventId, sequence, timestamp, runId, correlationId,
+sessionId?, artifactId?, actor, ownerEpoch, type, ...projected fields
+```
+
+The writer owns contiguous sequence assignment. The validator checks unique event IDs, run identity, expected start and terminal events, model-decision counts, and zero-model replay. Free-form page text, planner rationale, typed values, and raw receipt messages are excluded. Fixed `reasonCode`, fault code, phase, step, effect, and safe expected/observed categories retain the useful "what and why."
+
+## 6. Execution design
+
+### 6.1 Discovery sequence
+
+```mermaid
+sequenceDiagram
+  participant C as Caller
+  participant D as Discovery
+  participant P as Policy
+  participant S as Surface
+  participant M as Model
+  participant E as Evidence
+  C->>D: goal + target + typed inputs + artifact spec
+  D->>P: preflight navigate authorization
+  D->>S: create and navigate session
+  loop bounded steps and time
+    D->>S: fresh observation
+    D->>M: bounded, redacted observation + contract availability
+    M-->>D: schema-valid decision using fresh refs
+    D->>P: command + explicit effect authorization
+    D->>S: dispatch once
+    D->>S: fresh observation + postcondition
+    D->>E: projected event
+  end
+  D->>D: compile verified actions + lint + digest
+  D-->>C: artifact + typed result
+```
+
+An activation is offered to the model only when at least one visible control has an explicit discovery activation policy. The selected control is classified again immediately before dispatch. An undeclared activation defaults to `commit`; without exact authority it is blocked. Only idempotent, non-commit activations receive automatic retry.
+
+### 6.2 Replay sequence
+
+1. Parse artifact, recompute digest, validate optional strict artifact approval, binding, reviewed overrides, typed inputs, and policy.
+2. Deny invalid preflight before creating a surface.
+3. Create a fresh session, navigate within the exact origin/route boundary, and verify product fingerprints.
+4. For each step: resolve exactly one target, authorize the exact command/effect/operation, dispatch, inspect global sentinels, and verify the step postcondition.
+5. Validate outputs and the compound terminal predicate.
+6. Return a typed result with `modelCalls: 0` and close or deliberately retain the session.
+
+### 6.3 Handoff state machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> AUTOMATION_ACTIVE
+  AUTOMATION_ACTIVE --> PAUSE_REQUESTED: request pause
+  PAUSE_REQUESTED --> AWAITING_OPERATOR: in-flight action drains
+  AWAITING_OPERATOR --> OPERATOR_ACTIVE: token + claim
+  OPERATOR_ACTIVE --> RESUME_REQUESTED: operator requests return
+  RESUME_REQUESTED --> AUTOMATION_ACTIVE: fresh observation + checkpoint + new epoch
+  AUTOMATION_ACTIVE --> COMPLETED
+  AUTOMATION_ACTIVE --> FAILED
+  OPERATOR_ACTIVE --> AWAITING_OPERATOR: operator lease expires
+```
+
+The old automation grant must be invalid before operator action. Each click, type, key, and capture is checked by the operator policy hook immediately before reaching `SurfaceAdapter`. Resume must return the same session ID, a newer automation epoch, a fresh observation ID, and a passing recovery checkpoint.
+
+## 7. Safety design
+
+### 7.1 Policy intersection
+
+Effective permission is the intersection of three independently evaluated layers:
+
+```text
+platform maximum
+  AND tenant binding origin/route/command/effect
+  AND capability requirements
+  AND exact approval when an effect requires it
+```
+
+An omitted dimension means a layer does not constrain it; an empty allowlist denies all. Origin comparison is exact, route patterns are bounded, redirects are rechecked, and action approval never widens a layer.
+
+### 7.2 Authority types
+
+| Authority | Bound to | Purpose | Reuse |
+| --- | --- | --- | --- |
+| Artifact approval | artifact ID + revision + digest + reviewer + validity | Permit strict catalog replay of reviewed content | Reusable only for that immutable revision while valid |
+| Bound action approval | run + session/epoch + step/operation + command + effect + route + artifact digest + expiry | Permit one risky automated operation | Consumed once |
+| Human control grant | run + session + owner epoch + expiry | Permit policy-checked manual action while operator owns control | Only within that epoch |
+
+### 7.3 Model egress
+
+- Local Ollama is the default and evidence path.
+- Raw invocation input/output values are replaced by `{available, classification}` metadata.
+- Known non-public values are masked if echoed in a semantic observation; generic secret/PII patterns are also redacted.
+- Screenshot input defaults off for every provider and requires explicit vision opt-in.
+- A non-loopback OpenAI-compatible endpoint fails closed unless `HANDRAIL_ALLOW_REMOTE_MODEL_EGRESS=true` records deliberate authorization.
+- Page text is untrusted data and never changes the available action schema or policy.
+
+### 7.4 Evidence boundary
+
+Evidence writes use bounded relative paths, reject symlinks, append events without following links, and create immutable artifacts without replacement. Manifest v1.2 binds the source tree, source revision, synthetic target fixture, Node and Playwright versions, sanitized invocation, model/artifact identities, every run file, and same-session handoff proof. The validator rechecks hashes, byte lengths, PNG signatures, manifest/run identity, event order, result/model counts, handoff session/epoch/audit invariants, and sensitive text patterns. `liveModel: true` is run provenance asserted by this local system, not a third-party cryptographic attestation; that limitation is documented rather than hidden.
+
+## 8. Failure and recovery matrix
+
+| Condition | Detection | Response | Automatic retry |
+| --- | --- | --- | --- |
+| Invalid input/artifact/digest/approval | Preflight contract | `failed` before session | No |
+| Product/tenant mismatch | Fingerprint threshold | `INCOMPATIBLE_SURFACE` | No |
+| Zero target matches | Resolver | Configured bounded retry or `TARGET_NOT_FOUND` | Only if declared and idempotent |
+| Multiple target matches | Resolver | `TARGET_AMBIGUOUS` | No |
+| Member absent | Declared outcome predicate | `business_outcome/MEMBER_NOT_FOUND` | No |
+| Known loading state | Sentinel | Bounded wait/check | Yes, bounded |
+| Session expired | Sentinel | Same-session intervention | Human only |
+| Permission/app error | Sentinel | Structured hard failure | No |
+| Unknown activation/effect | Discovery policy | Deny before dispatch | No |
+| Commit without exact authority | Policy | `POLICY_DENIED` or intervention | No |
+| Stale model observation/ref | Freshness validation | `MODEL_INVALID_DECISION` | No |
+| False step/final checkpoint | Predicate | `POSTCONDITION_FAILED` | Only declared idempotent step recovery |
+| Lost/expired control lease | Coordinator | `CONTROL_LOST` or await operator | No silent takeover |
+| Process loss | Host boundary | `SESSION_LOST`; no replacement | No |
+
+## 9. Heterogeneity and multi-tenant evolution
+
+The artifact names logical controls and predicates; the adapter translates those into a surface-specific observation and action implementation. The submitted browser adapter resolves accessibility roles, labels, table relationships, frames, stable attributes, and a DOM-backed geometric fallback. It does not claim OCR or native-desktop support. A desktop adapter would implement the same `SurfaceAdapter` contract using OS accessibility nodes, window identity, OCR/vision anchors, and OS input dispatch without changing replay's result, policy, control, or evidence contracts.
+
+Vendor-family artifacts remain free of tenant URL, credentials, branding, and browser state. Tenant bindings supply those control-plane facts. Version and fingerprint telemetry can route a tenant to a reviewed artifact revision, quarantine drift, or request re-discovery. Replay health is keyed by artifact digest, binding revision, and fingerprint so a vendor update does not silently contaminate every tenant.
+
+## 10. Verification and traceability
+
+| Requirement | Implementation | Automated acceptance | Release evidence |
+| --- | --- | --- | --- |
+| R-3.1 | `src/runtime/discovery.ts`, `src/model/planner.ts`, `src/surface/browser-surface.ts` | discovery, planner, browser-surface, and real-browser tests | live discovery events and screenshots |
+| R-3.2 | `src/domain/schema.ts`, `src/runtime/artifact.ts` | schema, digest, lint, binding, target tests | checked artifact + digest |
+| R-3.3 | `src/runtime/replay.ts` | replay and e2e tests; planner-import guard | 10-run zero-model stability + not-found replay |
+| R-3.4 | `src/runtime/policy.ts`, `src/runtime/redaction.ts`, operator authorizer | policy, redaction, discovery activation, operator denial tests | sensitive scan + policy scenarios |
+| R-3.5 | `src/runtime/evidence.ts`, `scripts/validate-evidence.ts` | writer, symlink, hash, PNG, event-envelope tests | manifest-bound JSONL and screenshots |
+| R-3.6 | `src/runtime/control.ts`, `src/operator/`, discovery/replay callbacks | ownership race, stale grant, policy denial, same-session e2e | handoff screenshots and durable operator events |
+| R-3.7 | `src/surface/types.ts`, `AppBinding`, reviewed override contract | no-planner replay import, binding/fingerprint/override tests | architecture and SDD |
+| R-6 | root deliverables and `/evidence/` | documentation/evidence validation and clean-clone commands | public GitHub release and CI |
+
+Final release acceptance requires all of the following against one immutable commit: formatting/lint, typecheck, full tests, evidence validation, dependency audit, manual desktop/mobile/accessibility QA, genuine live discovery evidence, zero-model replay evidence, same-session handoff evidence, public CI, and anonymous-clone verification.
+
+## 11. Operational model and cuts
+
+The submitted runtime is single-host and intentionally small. In production, the natural split is an immutable artifact/approval catalog, tenant configuration service, isolated replay workers, durable lease/queue service, remote operator gateway with workforce identity, secret broker, and append-only evidence store. That split is deferred because building mock infrastructure would obscure the load-bearing contracts evaluated here.
+
+The implemented target is Chromium only; the geometric visual fallback is derived from DOM-observed bounds and must not be described as OCR or native vision. The operator surface is minimal. Local approval files stand in for a trusted catalog. Live provenance is not externally signed. These are explicit cuts with stable extension seams, not unmarked TODOs.
+
+## 12. Decision record
+
+| Decision | Choice | Reason | Consequence |
+| --- | --- | --- | --- |
+| ADR-01 | Modular monolith | Same-process ownership makes real same-session handoff testable | Process loss ends the session |
+| ADR-02 | Discover once, replay many | Moves model cost and uncertainty out of production execution | Artifact review and drift detection become critical |
+| ADR-03 | Declarative artifact | Reviewable, typed, portable across adapters | No arbitrary generated code |
+| ADR-04 | Semantic/contextual locator lattice | More robust than implementation selectors on legacy pages | Ambiguity must fail closed |
+| ADR-05 | Explicit activation classification | A button's risk cannot be inferred from its tag or label | Unknown activation is blocked |
+| ADR-06 | Four-way result union | Callers need domain outcomes distinct from faults | More deliberate sentinel and predicate design |
+| ADR-07 | Epoch lease plus mutex | Prevents human/automation concurrency on one session | Distributed durability deferred |
+| ADR-08 | Local Ollama evidence path | Genuine LLM discovery without external data egress | Evaluator needs local model for reproduction |
+| ADR-09 | Projected audit log | Keeps structural causality without raw regulated text | Debug detail uses safe categories, screenshots only when verified |
+| ADR-10 | Synthetic hostile target | Safe, deterministic, and exercises frames/tables/errors | No claim of production bank certification |
+
+## 13. Execution integrity
+
+The final SDD is normative for the reviewed implementation. [REQUIREMENTS.md](REQUIREMENTS.md) maps each assignment requirement to concrete code, tests, and release evidence and records the phased execution narrative and assumptions.
+
+The first public implementation revision was squashed. A squashed commit cannot prove the private chronological order of design and coding, so this repository does not use commit order as evidence that every design sentence existed before its implementation. Instead, submission acceptance is based on the final normative SDD, explicit decisions and cuts, a complete code/test/evidence trace, independent security and evaluator reviews, and clean-room verification of one public revision. This is a deliberate disclosure, not an inferred history.

@@ -1,6 +1,6 @@
 {
   "name": "@codelit-io/handrail-cua",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A safe discover-once, replay-many computer-use runtime with same-session human handoff.",
   "type": "module",
@@ -13,6 +13,7 @@
     "demo:offline": "tsx src/cli.ts demo --planner scripted",
     "demo:live": "tsx src/cli.ts demo --planner live",
     "discover": "tsx src/cli.ts discover",
+    "evidence:attach-handoff": "tsx scripts/attach-handoff-evidence.ts",
     "evidence:validate": "tsx scripts/validate-evidence.ts",
     "format": "biome check --write src test scripts",
     "lint": "biome check src test scripts",

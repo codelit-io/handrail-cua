@@ -3,12 +3,16 @@ import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import { createDemoBinding, createDemoPolicyStack } from "../src/demo/config.js";
 import {
+  type AppBinding,
+  type ArtifactApproval,
+  type CapabilityArtifact,
   type CapabilityArtifactDraft,
   type ModelDecision,
   RunResultSchema,
 } from "../src/domain/schema.js";
-import { compileArtifact } from "../src/runtime/artifact.js";
+import { compileArtifact, computeTargetDigest } from "../src/runtime/artifact.js";
 import { ControlCoordinator, ControlError, type ControlGrant } from "../src/runtime/control.js";
+import type { BoundApproval } from "../src/runtime/policy.js";
 import { ReplayEngine } from "../src/runtime/replay.js";
 import { BrowserSurface } from "../src/surface/browser-surface.js";
 import type { ActionReceipt, DispatchContext } from "../src/surface/types.js";
@@ -149,6 +153,72 @@ function artifactWithFirstStepTimeout(timeoutMs: number) {
   });
 }
 
+function strictEngine(surface: FakeReplaySurface): ReplayEngine {
+  return new ReplayEngine({
+    surface,
+    control: new ControlCoordinator(),
+    platformPolicy,
+    artifactApprovalMode: "strict",
+    now: () => new Date("2026-08-27T18:00:00.000Z"),
+    sleep: async () => undefined,
+  });
+}
+
+function artifactApproval(artifact: CapabilityArtifact): ArtifactApproval {
+  return {
+    artifactId: artifact.id,
+    revision: artifact.revision,
+    digest: artifact.digest,
+    approvedBy: "reviewer-01",
+    approvedAt: "2026-08-27T17:00:00.000Z",
+    expiresAt: "2026-08-27T19:00:00.000Z",
+  };
+}
+
+function commitArtifact(failingPostcondition = false): CapabilityArtifact {
+  const { digest: _digest, ...draft } = structuredClone(replayArtifact());
+  const commitStep = draft.steps[1];
+  assert.ok(commitStep?.command === "activate");
+  commitStep.effect = "commit";
+  commitStep.idempotency = "non_idempotent";
+  commitStep.retry = {
+    maxAttempts: 1,
+    delayMs: 0,
+    retryOn: failingPostcondition ? ["postcondition_timeout"] : [],
+  };
+  if (failingPostcondition) {
+    commitStep.postcondition = {
+      kind: "target_visible",
+      target: "resultsPanel",
+      expected: false,
+    };
+  }
+  draft.effects.push("commit");
+  draft.policyRequirements.allowedEffects.push("commit");
+  draft.policyRequirements.approvalRequiredFor.push("commit");
+  return compileArtifact(draft);
+}
+
+function commitBinding(): AppBinding {
+  const binding = structuredClone(replayBinding());
+  binding.policy.allowedEffects.push("commit");
+  return binding;
+}
+
+function commitApproval(artifact: CapabilityArtifact, runId: string): BoundApproval {
+  return {
+    id: "commit-approval-01",
+    runId,
+    operationId: "activate-lookup",
+    command: "activate",
+    effect: "commit",
+    origin: "http://127.0.0.1:4312",
+    route: "/legacy",
+    expiresAt: "2026-08-27T19:00:00.000Z",
+    capabilityDigest: artifact.digest,
+  };
+}
+
 describe("deterministic capability replay", () => {
   it("replays ordered typed steps, extracts a validated output, and proves zero model calls", async () => {
     const surface = new FakeReplaySurface();
@@ -212,6 +282,71 @@ describe("deterministic capability replay", () => {
     assert.equal(RunResultSchema.safeParse(result).success, true);
   });
 
+  it("strict mode requires an exact, current artifact approval before surface creation", async () => {
+    const artifact = replayArtifact();
+    const invalidApprovals: readonly (ArtifactApproval | undefined)[] = [
+      undefined,
+      { ...artifactApproval(artifact), artifactId: "another-artifact" },
+      { ...artifactApproval(artifact), revision: artifact.revision + 1 },
+      { ...artifactApproval(artifact), digest: "b".repeat(64) },
+      {
+        ...artifactApproval(artifact),
+        approvedAt: "2026-08-27T20:00:00.000Z",
+        expiresAt: "2026-08-27T21:00:00.000Z",
+      },
+      { ...artifactApproval(artifact), expiresAt: "2026-08-27T17:30:00.000Z" },
+    ];
+
+    for (const approval of invalidApprovals) {
+      const surface = new FakeReplaySurface();
+      const result = await strictEngine(surface).run({
+        artifact,
+        ...(approval ? { artifactApproval: approval } : {}),
+        binding: replayBinding(),
+        inputs: { memberId: "84721" },
+        runId: "replay-strict-approval-denied",
+      });
+      assert.equal(result.status, "failed");
+      if (result.status === "failed") {
+        assert.equal(result.error.phase, "preflight");
+        assert.equal(result.error.code, "ARTIFACT_INVALID");
+      }
+      assert.equal(surface.createCalls, 0);
+      assert.equal(surface.navigateCalls, 0);
+    }
+  });
+
+  it("accepts a valid strict approval and preserves explicit non-strict replay", async () => {
+    const artifact = replayArtifact();
+    const strictSurface = new FakeReplaySurface();
+    const strictResult = await strictEngine(strictSurface).run({
+      artifact,
+      artifactApproval: artifactApproval(artifact),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-strict-approval-accepted",
+    });
+    assert.equal(strictResult.status, "succeeded");
+    assert.equal(strictSurface.createCalls, 1);
+
+    const nonStrictSurface = new FakeReplaySurface();
+    const nonStrictResult = await new ReplayEngine({
+      surface: nonStrictSurface,
+      control: new ControlCoordinator(),
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+    }).run({
+      artifact,
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-non-strict-explicit",
+    });
+    assert.equal(nonStrictResult.status, "succeeded");
+    assert.equal(nonStrictSurface.createCalls, 1);
+  });
+
   it("rejects reviewed-content drift before creating a surface", async () => {
     const surface = new FakeReplaySurface();
     const artifact = structuredClone(replayArtifact());
@@ -251,6 +386,162 @@ describe("deterministic capability replay", () => {
     assert.equal(surface.createCalls, 0);
     assert.equal(surface.navigateCalls, 0);
     assert.equal(result.meta.modelCalls, 0);
+  });
+
+  it("rejects unreviewed or digest-drifted target overrides before creating a surface", async () => {
+    const artifact = replayArtifact();
+    const baseTarget = artifact.targets.lookupButton;
+    assert.ok(baseTarget);
+    const overrideTarget = structuredClone(baseTarget);
+    overrideTarget.robustnessRationale =
+      "Tenant review confirmed equivalent semantic locators for this exact legacy surface.";
+    const unreviewedBinding = {
+      ...replayBinding(),
+      targetOverrides: { lookupButton: overrideTarget },
+    };
+    const unreviewedSurface = new FakeReplaySurface();
+    const unreviewedResult = await engine(unreviewedSurface).run({
+      artifact,
+      binding: unreviewedBinding,
+      inputs: { memberId: "84721" },
+      runId: "replay-unreviewed-target-override",
+    });
+    assert.equal(unreviewedResult.status, "failed");
+    if (unreviewedResult.status === "failed") {
+      assert.equal(unreviewedResult.error.phase, "preflight");
+      assert.equal(unreviewedResult.error.code, "ARTIFACT_INVALID");
+    }
+    assert.equal(unreviewedSurface.createCalls, 0);
+
+    const reviewedBinding = {
+      ...unreviewedBinding,
+      targetOverrideReviews: {
+        lookupButton: {
+          baseTargetDigest: computeTargetDigest(baseTarget),
+          overrideTargetDigest: computeTargetDigest(overrideTarget),
+          reviewedBy: "reviewer-01",
+          reviewedAt: "2026-08-27T17:00:00.000Z",
+          expiresAt: "2026-08-27T19:00:00.000Z",
+        },
+      },
+    };
+    const tamperedBinding = structuredClone(reviewedBinding);
+    tamperedBinding.targetOverrides.lookupButton.description =
+      "A semantic target changed after its review";
+    const tamperedSurface = new FakeReplaySurface();
+    const tamperedResult = await engine(tamperedSurface).run({
+      artifact,
+      binding: tamperedBinding,
+      inputs: { memberId: "84721" },
+      runId: "replay-tampered-target-override",
+    });
+    assert.equal(tamperedResult.status, "failed");
+    if (tamperedResult.status === "failed") {
+      assert.equal(tamperedResult.error.phase, "preflight");
+      assert.equal(tamperedResult.error.code, "ARTIFACT_INVALID");
+    }
+    assert.equal(tamperedSurface.createCalls, 0);
+  });
+
+  it("accepts an exact digest-reviewed semantic target override", async () => {
+    const artifact = replayArtifact();
+    const baseTarget = artifact.targets.lookupButton;
+    assert.ok(baseTarget);
+    const overrideTarget = structuredClone(baseTarget);
+    overrideTarget.robustnessRationale =
+      "Tenant review confirmed equivalent semantic locators for this exact legacy surface.";
+    const surface = new FakeReplaySurface();
+    const result = await engine(surface).run({
+      artifact,
+      binding: {
+        ...replayBinding(),
+        targetOverrides: { lookupButton: overrideTarget },
+        targetOverrideReviews: {
+          lookupButton: {
+            baseTargetDigest: computeTargetDigest(baseTarget),
+            overrideTargetDigest: computeTargetDigest(overrideTarget),
+            reviewedBy: "reviewer-01",
+            reviewedAt: "2026-08-27T17:00:00.000Z",
+            expiresAt: "2026-08-27T19:00:00.000Z",
+          },
+        },
+      },
+      inputs: { memberId: "84721" },
+      runId: "replay-reviewed-target-override",
+    });
+    assert.equal(result.status, "succeeded");
+    assert.equal(surface.createCalls, 1);
+  });
+
+  it("executes one commit with an approval bound to its exact replay step", async () => {
+    const surface = new FakeReplaySurface();
+    const artifact = commitArtifact();
+    const runId = "replay-step-bound-commit-approval";
+    const result = await new ReplayEngine({
+      surface,
+      control: new ControlCoordinator(),
+      platformPolicy: {
+        ...platformPolicy,
+        allowedEffects: ["read", "reversible_write", "commit"],
+      },
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+    }).run({
+      artifact,
+      binding: commitBinding(),
+      inputs: { memberId: "84721" },
+      approval: commitApproval(artifact, runId),
+      runId,
+    });
+    assert.equal(result.status, "succeeded");
+    assert.equal(surface.activationCalls, 1);
+  });
+
+  it("consumes a step-bound approval before a commit can be attempted again", async () => {
+    const surface = new FakeReplaySurface();
+    const control = new ControlCoordinator();
+    const artifact = commitArtifact(true);
+    const runId = "replay-single-use-commit-approval";
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy: {
+        ...platformPolicy,
+        allowedEffects: ["read", "reversible_write", "commit"],
+      },
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      onIntervention: async (context) => {
+        control.requestPause(context.automationGrant, "Review failed commit checkpoint");
+        await control.quiesceAutomation(context.automationGrant);
+        const operatorGrant = control.claimOperator(context.session.id, "operator-approval-review");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        return {
+          sessionId: context.session.id,
+          automationGrant,
+          observation: await surface.observe(context.session.id),
+          checkpoint: {
+            passed: true,
+            observed: "Operator confirmed the same session is ready for guarded recovery.",
+          },
+        };
+      },
+    }).run({
+      artifact,
+      binding: commitBinding(),
+      inputs: { memberId: "84721" },
+      approval: commitApproval(artifact, runId),
+      runId,
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.code, "POLICY_DENIED");
+      assert.equal(result.error.observed, "APPROVAL_INVALID");
+    }
+    assert.equal(surface.activationCalls, 1);
+    assert.deepEqual(surface.dispatchCommands, ["set_value", "activate"]);
   });
 
   it("retries only a configured recoverable class and stays within maxAttempts", async () => {

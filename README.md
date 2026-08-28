@@ -6,6 +6,8 @@ Handrail is a compact computer-use automation runtime that discovers a workflow 
 
 The included vertical slice operates an explicitly synthetic legacy member-services UI. It demonstrates real browser interaction, bounded LLM-driven discovery, typed artifact compilation, zero-model replay, and exclusive same-session human handoff. It is a take-home system design and implementation, not a deployed banking service.
 
+Start with the [system design specification](docs/SYSTEM_DESIGN_SPEC.md) for requirements, trust boundaries, authority types, state machines, decisions, and SDD-to-code verification. The shorter [requirements trace](docs/REQUIREMENTS.md) maps every assignment requirement to implementation, tests, and release evidence.
+
 ```mermaid
 flowchart LR
   Goal[Goal + typed inputs] --> Discovery["Bounded discovery<br/>LLM decisions"]
@@ -67,12 +69,17 @@ npm run verify
 
 ## Genuine Ollama discovery, then replay
 
-The default live planner uses Ollama's native `/api/chat` endpoint. The model receives a bounded semantic observation from the current live surface; runtime screenshots remain available for evidence and operator review but are not sent as model vision input in this demo.
+The default live planner uses Ollama's native `/api/chat` endpoint. The model receives a bounded, redacted semantic observation and classification/availability metadata for invocation contracts. Raw classified input and output values are not included. Runtime screenshots remain available for evidence and operator review but are not sent as model vision input in this demo.
 
-Start Ollama and make the default semantic model available:
+In terminal A, start Ollama (leave this process running):
 
 ```bash
 ollama serve
+```
+
+In terminal B, pull the default semantic model:
+
+```bash
 ollama pull qwen3:4b
 ```
 
@@ -84,11 +91,13 @@ HANDRAIL_MODEL=qwen3:4b \
 npm run discover -- \
   --planner live \
   --goal "Look up the member by member number and return the current balance for the Savings account." \
+  --member-id 84721 \
   --run-id assignment-discovery \
   --output work/assignment-discovery
 
 npm run replay -- \
   --artifact work/assignment-discovery/artifact.json \
+  --member-id 26017 \
   --run-id assignment-replay \
   --output work/assignment-replay
 ```
@@ -117,6 +126,7 @@ A genuine discovery record must identify provider `ollama-local`, the actual mod
 | `HANDRAIL_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Canonical native Ollama endpoint used only by live discovery. `OLLAMA_HOST` is also accepted. |
 | `HANDRAIL_MODEL` | `qwen3:4b` | Canonical Ollama model used for live discovery. `OLLAMA_MODEL` is also accepted. |
 | `HANDRAIL_PLANNER_PROVIDER` | `ollama` | Select `ollama` or an explicitly configured `openai-compatible` endpoint. |
+| `HANDRAIL_ALLOW_REMOTE_MODEL_EGRESS` | `false` | Explicitly authorize semantic data egress to a non-loopback OpenAI-compatible endpoint. This does not enable screenshot input. |
 | `HANDRAIL_HEADLESS` | `true` | Set to `false` to watch Chromium during a local demo. |
 | `HANDRAIL_EVIDENCE_DIR` | Run-specific local default | Root for sanitized artifacts, JSONL events, summaries, and screenshots. |
 
@@ -135,17 +145,38 @@ Known transient states have small, explicit retry budgets. Ambiguous targets, st
 
 ## Same-session operator control
 
-When a run requests help, Handrail opens a loopback-only console for the existing `SurfaceSession`. The operator claims the current epoch, can click the live screenshot, type into the focused control, press an allowlisted key, and capture evidence. Automation's prior grant is invalid immediately. A stale claim or competing owner receives `CONTROL_LOST`.
+When a run requests help, Handrail opens a loopback-only console for the existing `SurfaceSession`. Each intervention has a cryptographically random capability in the URL fragment. The bootstrap exchanges it for a path-scoped, `HttpOnly`, `SameSite=Strict` cookie and clears the fragment before loading runtime state. Every state, screenshot, and mutation route rejects a missing or mismatched capability.
+
+The operator claims the current epoch, can click the live screenshot, type into the focused control, press an allowlisted key, and capture evidence. Every operator action passes the same fail-closed policy intersection immediately before dispatch. Automation's prior grant is invalid immediately. A stale claim or competing owner receives `CONTROL_LOST`.
 
 Returning control performs a fresh observation, evaluates the checkpoint, and issues a new automation grant. The console never launches, replaces, closes, or silently recreates the target browser session.
 
+Run the evaluator handoff path in a headed browser:
+
+```bash
+npm run replay -- \
+  --artifact evidence/artifacts/member.balance.lookup.v1.json \
+  --artifact-approval evidence/artifacts/member.balance.lookup.v1.approval.json \
+  --member-id 84721 \
+  --scenario session-expired \
+  --handoff \
+  --headed \
+  --run-id evaluator-handoff \
+  --output work/evaluator-handoff
+```
+
+Open the printed `intervention` URL, claim control, capture the expired state, select **Restore Session** in the live screenshot, capture the restored state, then choose **Return to automation**. The summary proves the original/resumed session ID, authority epochs, checkpoint result, operator-event count, screenshot hashes, and zero-model completion. The committed bundle contains the same sequence as manifest-validated release evidence.
+
 ## Screenshots
 
-These sanitized local screenshots show deterministic real-browser replay and the expired-session operator flow. They are visual QA evidence, not a substitute for the native Ollama discovery manifest.
+These sanitized local screenshots form the scenario review matrix. They are visual QA evidence, not a substitute for the machine-validated live discovery manifest.
 
-| Fresh-session replay with a different typed input | Human control of the retained expired session |
-| --- | --- |
-| ![Synthetic member lookup replayed with member 26017](docs/screenshots/replay-success-different-input.png) | ![Handrail operator console displaying the retained expired browser session](docs/screenshots/operator-handoff-desktop.png) |
+| Scenario | Screenshot | Scenario | Screenshot |
+| --- | --- | --- | --- |
+| Legacy surface | [desktop target](docs/screenshots/legacy-surface-desktop.png) | Different-input replay | [successful replay](docs/screenshots/replay-success-different-input.png) |
+| Expected outcome | [member not found](docs/screenshots/replay-member-not-found.png) | Permission fault | [permission denied](docs/screenshots/replay-permission-denied.png) |
+| Ambiguity fault | [ambiguous target](docs/screenshots/replay-ambiguous-target.png) | Handoff desktop | [retained session](docs/screenshots/operator-handoff-desktop.png) |
+| Handoff mobile | [responsive console](docs/screenshots/operator-handoff-mobile.png) | Recovery | [restored session](docs/screenshots/operator-session-restored.png) |
 
 ## Repository guide
 
@@ -157,7 +188,7 @@ These sanitized local screenshots show deterministic real-browser replay and the
 | `src/operator/` | Same-session operator HTTP console and responsive UI. |
 | `src/target/` | Local synthetic legacy application and deterministic fault states. |
 | `test/` | Unit, integration, real-browser, failure-injection, and handoff tests. |
-| `docs/` | Frozen design, requirements traceability, demo script, and QA plan. |
+| `docs/` | Canonical SDD, requirements traceability, demo script, UI spec, and QA plan. |
 | `evidence/` | Sanitized run evidence when produced and release-validated. |
 
 The concise engineering rationale is in [REPORT.md](REPORT.md). Verification status and stop-ship gates are in [docs/QA.md](docs/QA.md).

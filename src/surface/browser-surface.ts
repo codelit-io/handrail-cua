@@ -319,18 +319,22 @@ async function visibleHandles(locator: Locator): Promise<Array<ElementHandle<HTM
   return handles;
 }
 
-function surfaceSignature(page: Page): Promise<string> {
-  return Promise.all([
-    Promise.resolve(page.url()),
-    page
-      .locator("body")
-      .innerText({ timeout: 1_000 })
-      .catch(() => ""),
-  ]).then(([url, text]) =>
-    createHash("sha256")
-      .update(`${routeOnly(url)}\n${normalizedText(text)}`)
-      .digest("hex"),
+async function surfaceSignature(page: Page): Promise<string> {
+  const frames = await Promise.all(
+    page.frames().map(async (frame) => ({
+      name: frame.name(),
+      route: routeOnly(frame.url()),
+      text: normalizedText(
+        await frame
+          .locator("body")
+          .innerText({ timeout: 1_000 })
+          .catch(() => ""),
+      ),
+    })),
   );
+  return createHash("sha256")
+    .update(frames.map((frame) => `${frame.name}\n${frame.route}\n${frame.text}`).join("\n---\n"))
+    .digest("hex");
 }
 
 function matcherPasses(

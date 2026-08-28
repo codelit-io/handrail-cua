@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -10,6 +11,7 @@ import {
   DEMO_REPLAY_SENTINELS,
 } from "./demo/spec.js";
 import {
+  type ArtifactApproval,
   type AutomationFault,
   type CapabilityArtifact,
   CapabilityArtifactSchema,
@@ -23,6 +25,7 @@ import {
   ScriptedPlanner,
 } from "./model/planner.js";
 import {
+  type OperatorActionAuthorizer,
   type OperatorConsoleHandle,
   type OperatorResumeResult,
   startOperatorConsole,
@@ -33,7 +36,13 @@ import {
   type DiscoveryRequest,
   type DiscoveryResult,
 } from "./runtime/discovery.js";
-import { type EvidenceKind, type EvidenceRef, EvidenceWriter } from "./runtime/evidence.js";
+import {
+  type EvidenceKind,
+  type EvidenceRef,
+  EvidenceWriter,
+  safeFaultDiagnostic,
+} from "./runtime/evidence.js";
+import { checkPolicy, type RuntimeCommand } from "./runtime/policy.js";
 import { classified, redactValue } from "./runtime/redaction.js";
 import { ReplayEngine } from "./runtime/replay.js";
 import { BrowserSurface } from "./surface/browser-surface.js";
@@ -54,6 +63,7 @@ const SCENARIOS = new Set<LegacyScenario>([
 ]);
 const KNOWN_OPTIONS = new Set([
   "artifact",
+  "artifact-approval",
   "goal",
   "headless",
   "headed",
@@ -72,6 +82,7 @@ const KNOWN_OPTIONS = new Set([
   "run-id",
   "scenario",
   "screenshots-safe",
+  "source-revision",
   "target",
   "target-only",
   "target-port",
@@ -104,13 +115,27 @@ interface ManagedTarget {
 interface RunEvidence {
   readonly id: string;
   readonly kind: "discovery" | "replay";
-  readonly scenario: "success" | "exception";
+  readonly scenario: "success" | "exception" | "handoff";
   readonly directory: string;
   readonly summary: string;
   readonly summarySha256: string;
   readonly events: string;
   readonly eventsSha256: string;
   readonly screenshots: readonly ScreenshotEvidenceRef[];
+}
+
+interface HandoffEvidenceSummary {
+  readonly interventionId: string;
+  readonly reason: InterventionView["reason"];
+  readonly originalSessionId: string;
+  readonly resumedSessionId: string;
+  readonly sameSession: true;
+  readonly automationEpochBefore: number;
+  readonly operatorEpoch: number;
+  readonly automationEpochAfter: number;
+  readonly checkpointPassed: true;
+  readonly operatorAuditEvents: number;
+  readonly evidence: readonly EvidenceRef[];
 }
 
 interface ScreenshotEvidenceRef {
@@ -125,6 +150,21 @@ interface ModelEvidence {
   readonly modelId: string;
   readonly liveModel: boolean;
   readonly digest?: string;
+}
+
+interface RuntimeProvenance {
+  readonly sourceRevision: string;
+  readonly sourceTreeSha256: string;
+  readonly targetFixtureSha256: string;
+  readonly nodeVersion: string;
+  readonly playwrightVersion: string;
+  readonly invocation: {
+    readonly command: "demo:offline" | "demo:live";
+    readonly planner: PlannerMode;
+    readonly replayRuns: number;
+    readonly screenshotModelInput: boolean;
+    readonly syntheticTarget: boolean;
+  };
 }
 
 interface StabilityRun {
@@ -282,12 +322,136 @@ function absoluteOutput(args: ParsedArguments, io: CliIo, fallback: string): str
   return resolved;
 }
 
+async function treeSha256(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(absolute);
+        continue;
+      }
+      if (!entry.isFile())
+        throw new Error(`Runtime source contains unsupported entry ${absolute}.`);
+      const relative = path.relative(root, absolute).split(path.sep).join("/");
+      hash.update(relative, "utf8");
+      hash.update("\0", "utf8");
+      hash.update(await readFile(absolute));
+      hash.update("\0", "utf8");
+    }
+  };
+  await visit(root);
+  return hash.digest("hex");
+}
+
+async function installedPackageVersion(root: string, packageName: string): Promise<string> {
+  const manifest = JSON.parse(
+    await readFile(path.join(root, "node_modules", packageName, "package.json"), "utf8"),
+  ) as { readonly version?: unknown };
+  if (typeof manifest.version !== "string" || manifest.version.length === 0) {
+    throw new Error(`Installed ${packageName} package does not declare a version.`);
+  }
+  return manifest.version;
+}
+
+async function runtimeProvenance(
+  args: ParsedArguments,
+  io: CliIo,
+  mode: PlannerMode,
+  target: ManagedTarget,
+  replayRuns: number,
+): Promise<RuntimeProvenance> {
+  const sourceRevision = option(args, "source-revision") ?? "working-tree";
+  if (sourceRevision !== "working-tree" && !/^[a-f0-9]{40}$/u.test(sourceRevision)) {
+    throw new Error(
+      "--source-revision must be a lowercase 40-character Git commit or working-tree.",
+    );
+  }
+  return {
+    sourceRevision,
+    sourceTreeSha256: await treeSha256(path.join(io.cwd, "src")),
+    targetFixtureSha256: await treeSha256(path.join(io.cwd, "src", "target")),
+    nodeVersion: process.version,
+    playwrightVersion: await installedPackageVersion(io.cwd, "playwright"),
+    invocation: {
+      command: mode === "live" ? "demo:live" : "demo:offline",
+      planner: mode,
+      replayRuns,
+      screenshotModelInput: flag(args, "include-screenshot"),
+      syntheticTarget: target.synthetic,
+    },
+  };
+}
+
 function scenario(args: ParsedArguments): LegacyScenario {
   const value = option(args, "scenario") ?? "normal";
   if (!SCENARIOS.has(value as LegacyScenario)) {
     throw new Error(`Unknown synthetic scenario ${value}.`);
   }
   return value as LegacyScenario;
+}
+
+function operatorCommand(
+  action: Parameters<OperatorActionAuthorizer>[0]["action"],
+): RuntimeCommand {
+  switch (action) {
+    case "activate_coordinate":
+      return "activate";
+    case "type":
+      return "set_value";
+    case "press_key":
+      return "press_key";
+    case "capture_evidence":
+      return "capture_evidence";
+  }
+}
+
+function demoOperatorAuthorizer(
+  binding: ReturnType<typeof createDemoBinding>,
+  targetUrl: string,
+): OperatorActionAuthorizer {
+  const base = createDemoPolicyStack(binding);
+  const operatorPolicy = {
+    platform: {
+      ...base.platform,
+      allowedEffects: ["read", "reversible_write", "commit"] as const,
+    },
+    binding: {
+      ...base.binding,
+      allowedEffects: ["read", "reversible_write", "commit"] as const,
+    },
+    capability: {
+      name: "operator-handoff",
+      allowedRoutes: ["/legacy", "/legacy/**"],
+      allowedCommands: ["activate", "set_value", "press_key", "capture_evidence"] as const,
+      allowedEffects: ["read", "reversible_write", "commit"] as const,
+      approvalRequiredFor: ["commit"] as const,
+    },
+  };
+  return (context) => {
+    const decision = checkPolicy(operatorPolicy, {
+      url: targetUrl,
+      command: operatorCommand(context.action),
+      effect: context.effect,
+      actor: "operator",
+      runId: context.runId,
+      sessionId: context.sessionId,
+      ownerEpoch: context.ownerEpoch,
+      humanGrant: {
+        id: `human-${context.operatorId}`,
+        runId: context.runId,
+        sessionId: context.sessionId,
+        ownerEpoch: context.ownerEpoch,
+        expiresAt: context.operatorLeaseExpiresAt,
+      },
+      now: context.requestedAt,
+    });
+    return decision.allowed
+      ? { allowed: true, authorization: decision.authorization }
+      : { allowed: false, code: decision.code, summary: decision.summary };
+  };
 }
 
 function createPlanner(
@@ -328,6 +492,7 @@ function createPlanner(
       model,
       providerName: env.HANDRAIL_PROVIDER_NAME ?? "openai-compatible-local",
       includeScreenshot,
+      allowRemoteDataEgress: parseBoolean(env.HANDRAIL_ALLOW_REMOTE_MODEL_EGRESS, false),
       timeoutMs,
     });
   }
@@ -472,6 +637,7 @@ function projectedFault(error: AutomationFault): Record<string, unknown> {
     phase: error.phase,
     retryable: error.retryable,
     ...(error.stepId ? { stepId: error.stepId } : {}),
+    diagnostic: safeFaultDiagnostic(error.code),
     evidence: error.evidence,
   };
 }
@@ -521,14 +687,16 @@ export function projectRunResultForSummary(
 }
 
 export function replaySummary(
-  scenarioName: "success" | "exception",
+  scenarioName: "success" | "exception" | "handoff",
   result: RunResult,
   artifact: CapabilityArtifact | undefined,
+  handoff?: HandoffEvidenceSummary,
 ) {
   return {
     kind: "replay",
     scenario: scenarioName,
     result: projectRunResultForSummary(result, artifact),
+    ...(handoff ? { handoff } : {}),
   };
 }
 
@@ -543,13 +711,14 @@ async function writeDiscoverySummary(
 
 async function writeReplaySummary(
   writer: EvidenceWriter,
-  scenarioName: "success" | "exception",
+  scenarioName: "success" | "exception" | "handoff",
   result: RunResult,
   artifact: CapabilityArtifact | undefined,
+  handoff?: HandoffEvidenceSummary,
 ): Promise<{ summary: EvidenceRef; events: EvidenceRef }> {
   const summary = await writer.writeJson(
     "summary.json",
-    replaySummary(scenarioName, result, artifact),
+    replaySummary(scenarioName, result, artifact, handoff),
   );
   const events = await writer.eventLogRef();
   return { summary, events };
@@ -619,6 +788,8 @@ async function runDiscovery(args: ParsedArguments, io: CliIo, mode: PlannerMode)
   const target = await managedTarget(args);
   const control = new ControlCoordinator();
   const surface = await BrowserSurface.launch({ control, headless: headless(args, io.env) });
+  let operator: OperatorConsoleHandle | undefined;
+  let handoffInterrupted = false;
   try {
     const binding = createDemoBinding(target.origin);
     const planner = createPlanner(mode, args, io.env);
@@ -633,19 +804,90 @@ async function runDiscovery(args: ParsedArguments, io: CliIo, mode: PlannerMode)
     });
     const memberId = option(args, "member-id") ?? DEMO_INPUTS.memberId;
     const request: DiscoveryRequest = { ...baseRequest, inputs: { memberId } };
+    if (flag(args, "handoff")) {
+      operator = await startOperatorConsole({
+        control,
+        surface,
+        port: integerOption(args, "operator-port", 4313, 0, 65_535),
+        authorizeOperatorAction: demoOperatorAuthorizer(binding, target.entryUrl),
+        auditSink: (event) => writer.appendEvent(event),
+        ...(target.synthetic
+          ? {
+              captureSink: (capture) =>
+                writer.writeScreenshot(`screenshots/${capture.id}.png`, capture.screenshotPng, {
+                  redactionVerified: true,
+                  mimeType: capture.mimeType,
+                }),
+            }
+          : {}),
+      });
+    }
     const result = await new DiscoveryEngine({
       surface,
       planner,
       control,
       policy: createDemoPolicyStack(binding),
       evidence: writer,
+      ...(operator
+        ? {
+            onIntervention: async (context) => {
+              if (!operator) throw new Error("Operator console is unavailable.");
+              const intervention = await operator.openIntervention({
+                runId: context.runId,
+                capability: context.capabilityId,
+                currentStep: "discovery-loop",
+                reason: context.reason,
+                stoppedBecause: context.summary,
+                session: context.session,
+                automationGrant: context.automationGrant,
+                automationId: context.runId,
+                evaluateCheckpoint: async ({ session, observation }) => {
+                  const blocked = /Your session has expired/iu.test(observation.visibleText);
+                  const findMemberVisible = observation.elements.some(
+                    (element) => element.role === "button" && element.name === "Find Member",
+                  );
+                  return {
+                    passed: session.id === context.session.id && !blocked && findMemberVisible,
+                    observed: blocked
+                      ? "The session-expiry dialog still blocks discovery."
+                      : findMemberVisible
+                        ? "The same session is restored and Find Member is visible."
+                        : "The session changed to an unknown state.",
+                  };
+                },
+              });
+              io.stdout(
+                `${JSON.stringify({
+                  kind: "intervention",
+                  phase: "discovery",
+                  state: "AWAITING_OPERATOR",
+                  runId: context.runId,
+                  sessionId: intervention.sessionId,
+                  reason: context.reason,
+                  operator: operator.origin,
+                  intervention: intervention.url,
+                })}\n`,
+              );
+              const resumed = await waitForResumeOrShutdown(intervention.waitForResume);
+              if (!resumed) {
+                handoffInterrupted = true;
+                throw new Error("Discovery handoff was interrupted by shutdown.");
+              }
+              return resumed;
+            },
+          }
+        : {}),
     }).discover(request);
+    if (handoffInterrupted) return 0;
     await writeDiscoverySummary(writer, result);
     io.stdout(`${JSON.stringify({ output, result: discoverySummary(result) }, null, 2)}\n`);
     return exitForResult(result);
   } finally {
-    await surface.close();
-    await target.close();
+    await closeBrowserCommandResources(
+      operator ?? { close: async () => undefined },
+      surface,
+      target,
+    );
   }
 }
 
@@ -657,6 +899,10 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
     option(args, "artifact") ?? "evidence/artifacts/member.balance.lookup.v1.json",
   );
   const artifact = JSON.parse(await readFile(artifactPath, "utf8")) as unknown;
+  const artifactApprovalPath = option(args, "artifact-approval");
+  const artifactApproval = artifactApprovalPath
+    ? (JSON.parse(await readFile(path.resolve(io.cwd, artifactApprovalPath), "utf8")) as unknown)
+    : undefined;
   const parsedArtifact = CapabilityArtifactSchema.safeParse(artifact);
   const summaryArtifact = parsedArtifact.success ? parsedArtifact.data : undefined;
   const target = await managedTarget(args);
@@ -664,6 +910,8 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
   const surface = await BrowserSurface.launch({ control, headless: headless(args, io.env) });
   let operator: OperatorConsoleHandle | undefined;
   let handoffInterrupted = false;
+  const operatorEvidence: EvidenceRef[] = [];
+  let handoffSummary: HandoffEvidenceSummary | undefined;
   try {
     const binding = createDemoBinding(target.origin);
     const writer = new CliEvidenceWriter({ rootDirectory: output });
@@ -672,6 +920,22 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
         control,
         surface,
         port: integerOption(args, "operator-port", 4313, 0, 65_535),
+        authorizeOperatorAction: demoOperatorAuthorizer(binding, target.entryUrl),
+        auditSink: (event) => writer.appendEvent(event),
+        ...(target.synthetic
+          ? {
+              captureSink: (capture) =>
+                writer
+                  .writeScreenshot(`screenshots/${capture.id}.png`, capture.screenshotPng, {
+                    redactionVerified: true,
+                    mimeType: capture.mimeType,
+                  })
+                  .then((ref) => {
+                    operatorEvidence.push(ref);
+                    return ref;
+                  }),
+            }
+          : {}),
       });
     }
     const result = await new ReplayEngine({
@@ -681,6 +945,7 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
       evidence: writer,
       screenshotRedactionVerified: target.synthetic,
       surfaceSentinels: DEMO_REPLAY_SENTINELS,
+      artifactApprovalMode: artifactApproval === undefined ? "non_strict" : "strict",
       ...(operator
         ? {
             onIntervention: async (context) => {
@@ -725,6 +990,30 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
                 handoffInterrupted = true;
                 throw new Error("Replay handoff was interrupted by shutdown.");
               }
+              const audit = intervention.audit();
+              const operatorEpoch = audit.find(
+                (event) => event.action === "control_claimed",
+              )?.ownerEpoch;
+              if (
+                resumed.sessionId !== context.session.id ||
+                !resumed.checkpoint.passed ||
+                operatorEpoch === undefined
+              ) {
+                throw new Error("Replay handoff resumed without complete same-session evidence.");
+              }
+              handoffSummary = {
+                interventionId: `handoff-${context.runId}`,
+                reason: context.reason,
+                originalSessionId: context.session.id,
+                resumedSessionId: resumed.sessionId,
+                sameSession: true,
+                automationEpochBefore: context.automationGrant.epoch,
+                operatorEpoch,
+                automationEpochAfter: resumed.automationGrant.epoch,
+                checkpointPassed: true,
+                operatorAuditEvents: audit.length,
+                evidence: [...operatorEvidence],
+              };
               return resumed;
             },
           }
@@ -735,13 +1024,15 @@ async function runReplay(args: ParsedArguments, io: CliIo): Promise<number> {
       inputs: { memberId: option(args, "member-id") ?? "26017" },
       targetUrl: target.entryUrl,
       runId: id,
+      ...(artifactApproval === undefined ? {} : { artifactApproval }),
     });
     if (handoffInterrupted) return 0;
     await writeReplaySummary(
       writer,
-      result.status === "succeeded" ? "success" : "exception",
+      handoffSummary ? "handoff" : result.status === "succeeded" ? "success" : "exception",
       result,
       summaryArtifact,
+      handoffSummary,
     );
     io.stdout(
       `${JSON.stringify(
@@ -776,6 +1067,7 @@ async function replayForDemo(
   scenarioName: "success" | "exception",
   memberId: string,
   artifact: CapabilityArtifact,
+  artifactApproval: ArtifactApproval,
   target: ManagedTarget,
   surface: BrowserSurface,
   control: ControlCoordinator,
@@ -790,7 +1082,8 @@ async function replayForDemo(
     evidence: writer,
     screenshotRedactionVerified: target.synthetic,
     surfaceSentinels: DEMO_REPLAY_SENTINELS,
-  }).run({ artifact, binding, inputs: { memberId }, runId: id });
+    artifactApprovalMode: "strict",
+  }).run({ artifact, artifactApproval, binding, inputs: { memberId }, runId: id });
   const refs = await writeReplaySummary(writer, scenarioName, result, artifact);
   return {
     result,
@@ -845,6 +1138,18 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
       discovery.artifact,
       "artifact",
     );
+    const artifactApproval: ArtifactApproval = {
+      artifactId: discovery.artifact.id,
+      revision: discovery.artifact.revision,
+      digest: discovery.artifact.digest,
+      approvedBy: "local-evaluator",
+      approvedAt: io.now().toISOString(),
+    };
+    const artifactApprovalRef = await rootWriter.writeJson(
+      "artifacts/member.balance.lookup.v1.approval.json",
+      artifactApproval,
+      "artifact",
+    );
     const replayCount = integerOption(args, "replays", 1, 1, 50);
     const replaySuccesses: Array<Awaited<ReturnType<typeof replayForDemo>>> = [];
     for (let index = 0; index < replayCount; index += 1) {
@@ -856,6 +1161,7 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
           "success",
           option(args, "replay-member-id") ?? "26017",
           discovery.artifact,
+          artifactApproval,
           target,
           surface,
           control,
@@ -869,6 +1175,7 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
       "exception",
       "99999",
       discovery.artifact,
+      artifactApproval,
       target,
       surface,
       control,
@@ -897,6 +1204,7 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
     );
     const stabilityRef = await rootWriter.writeJson("stability.json", stability);
     const model = await resolvedModelEvidence(discovery.artifact.provenance, io.env);
+    const provenance = await runtimeProvenance(args, io, mode, target, replayCount);
     await rootWriter.writeSanitizedText(
       "README.md",
       [
@@ -908,12 +1216,15 @@ async function runDemo(args: ParsedArguments, io: CliIo, mode: PlannerMode): Pro
       ].join("\n"),
     );
     await rootWriter.writeJson("manifest.json", {
-      schemaVersion: "1.1.0",
+      schemaVersion: "1.2.0",
       generatedAt: io.now().toISOString(),
       mode,
       model,
+      provenance,
       artifact: artifactRef.relativePath,
       artifactSha256: artifactRef.sha256,
+      artifactApproval: artifactApprovalRef.relativePath,
+      artifactApprovalSha256: artifactApprovalRef.sha256,
       stability: { path: stabilityRef.relativePath, sha256: stabilityRef.sha256 },
       runs,
     });
@@ -1096,6 +1407,10 @@ async function serve(args: ParsedArguments, io: CliIo): Promise<number> {
     control,
     surface,
     port: integerOption(args, "operator-port", 4313, 0, 65_535),
+    authorizeOperatorAction: demoOperatorAuthorizer(
+      createDemoBinding(target.origin),
+      target.entryUrl(scenario(args)),
+    ),
   });
   try {
     if (scenario(args) === "session-expired") {
@@ -1180,7 +1495,7 @@ async function serve(args: ParsedArguments, io: CliIo): Promise<number> {
 
 function help(io: CliIo): number {
   io.stdout(
-    `Handrail - discover once, replay deterministically\n\nUsage:\n  npm run catalog -- --json\n  npm run demo:offline -- --replays 10 --output work/demo\n  npm run demo:live -- --replays 10 --output work/demo-live\n  npm run discover -- --planner live --goal "Look up the synthetic member savings balance" --target http://127.0.0.1:4312/legacy --output work/discovery-live\n  npm run replay -- --artifact evidence/artifacts/member.balance.lookup.v1.json\n  npm run replay -- --artifact evidence/artifacts/member.balance.lookup.v1.json --scenario session-expired --handoff\n  npm run serve -- --scenario session-expired --port 4312 --operator-port 4313\n\nCore options:\n  --goal TEXT               Natural-language discovery goal (1-500 characters)\n  --target URL              HTTP(S) /legacy target; omitted starts the synthetic target\n  --planner scripted|live   Live defaults to native Ollama\n  --run-id ID               Stable caller-supplied run ID\n  --output DIRECTORY        Exact evidence directory\n  --member-id VALUE         Synthetic invocation input\n  --replays COUNT           Successful deterministic replays in demo (1-50)\n  --handoff                 Open a same-session operator console during replay\n  --headed                  Show Chromium\n  --include-screenshot      Send screenshots to a configured vision model\n\nLive environment:\n  HANDRAIL_PLANNER_PROVIDER=ollama|openai-compatible\n  HANDRAIL_OLLAMA_BASE_URL or OLLAMA_BASE_URL (default http://127.0.0.1:11434)\n  HANDRAIL_MODEL or OLLAMA_MODEL (default qwen3:4b)\n  LLM_BASE_URL, LLM_API_KEY, LLM_MODEL (openai-compatible only)\n`,
+    `Handrail - discover once, replay deterministically\n\nUsage:\n  npm run catalog -- --json\n  npm run demo:offline -- --replays 10 --output work/demo\n  npm run demo:live -- --replays 10 --output work/demo-live\n  npm run discover -- --planner live --goal "Look up the synthetic member savings balance" --target http://127.0.0.1:4312/legacy --output work/discovery-live\n  npm run replay -- --artifact evidence/artifacts/member.balance.lookup.v1.json\n  npm run replay -- --artifact evidence/artifacts/member.balance.lookup.v1.json --scenario session-expired --handoff\n  npm run serve -- --scenario session-expired --port 4312 --operator-port 4313\n\nCore options:\n  --artifact PATH           Capability artifact to replay\n  --artifact-approval PATH  Enable strict replay with a digest-bound approval record\n  --goal TEXT               Natural-language discovery goal (1-500 characters)\n  --target URL              HTTP(S) /legacy target; omitted starts the synthetic target\n  --planner scripted|live   Live defaults to native Ollama\n  --run-id ID               Stable caller-supplied run ID\n  --output DIRECTORY        Exact evidence directory\n  --source-revision COMMIT  Bind evidence to a 40-character Git revision\n  --member-id VALUE         Synthetic invocation input\n  --replays COUNT           Successful deterministic replays in demo (1-50)\n  --handoff                 Open a same-session operator console during replay\n  --headed                  Show Chromium\n  --include-screenshot      Send screenshots to a configured vision model\n\nLive environment:\n  HANDRAIL_PLANNER_PROVIDER=ollama|openai-compatible\n  HANDRAIL_OLLAMA_BASE_URL or OLLAMA_BASE_URL (default http://127.0.0.1:11434)\n  HANDRAIL_MODEL or OLLAMA_MODEL (default qwen3:4b)\n  HANDRAIL_ALLOW_REMOTE_MODEL_EGRESS=false (required for non-loopback compatible endpoints)\n  LLM_BASE_URL, LLM_API_KEY, LLM_MODEL (openai-compatible only)\n`,
   );
   return 0;
 }

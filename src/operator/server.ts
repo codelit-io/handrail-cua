@@ -5,8 +5,10 @@ import { type RedactedValue, redactText, redactValue } from "../runtime/redactio
 import type { SurfaceAdapter, SurfaceObservation } from "../surface/types.js";
 import type {
   OpenOperatorInterventionInput,
+  OperatorActionAuthorizer,
   OperatorAuditAction,
   OperatorAuditEvent,
+  OperatorAuthorizationContext,
   OperatorCapture,
   OperatorConsoleHandle,
   OperatorConsoleOptions,
@@ -22,6 +24,8 @@ const MAX_REQUEST_BYTES = 16 * 1_024;
 const MAX_SCREENSHOT_BYTES = 20 * 1_024 * 1_024;
 const MAX_CAPTURES_PER_SESSION = 8;
 const MAX_TYPED_CHARACTERS = 4_096;
+const CAPABILITY_FRAGMENT_KEY = "capability";
+const CAPABILITY_HEADER = "x-handrail-capability";
 const SAFE_IDENTIFIER = /^[A-Za-z][A-Za-z0-9._-]{1,127}$/u;
 const SAFE_KEYS = new Set([
   "Enter",
@@ -41,10 +45,65 @@ const SAFE_KEYS = new Set([
   "Space",
 ]);
 
+const denyUnconfiguredOperatorAction: OperatorActionAuthorizer = () => ({
+  allowed: false,
+  code: "POLICY_UNCONFIGURED",
+  summary: "No operator action policy was configured.",
+});
+
+/**
+ * Explicit compatibility policy for the synthetic, loopback-only evaluator
+ * demo. Production callers should bind the authorization hook to their runtime
+ * policy and approval system instead.
+ */
+export const allowLoopbackDemoOperatorAction: OperatorActionAuthorizer = () => ({
+  allowed: true,
+  authorization: "loopback_demo",
+});
+
+const OPERATOR_BOOTSTRAP_SCRIPT = `
+(() => {
+  "use strict";
+
+  const sessionId = document.body.dataset.sessionId || "";
+  const status = document.getElementById("console-status");
+  const fail = (message) => {
+    if (status) {
+      status.textContent = message;
+      status.dataset.error = "true";
+    }
+  };
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const capability = fragment.get("capability") || "";
+  if (!sessionId) {
+    fail("This operator link is missing its intervention context.");
+    return;
+  }
+
+  fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/bootstrap", {
+    method: "POST",
+    headers: {
+      "X-Handrail-Console": "1",
+      ...(capability ? { "X-Handrail-Capability": capability } : {})
+    },
+    credentials: "same-origin",
+    cache: "no-store"
+  }).then((response) => {
+    if (!response.ok) throw new Error("This operator link is invalid or expired.");
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    const runtime = document.createElement("script");
+    runtime.src = "/operator-runtime.js";
+    runtime.addEventListener("error", () => fail("The operator console could not start."));
+    document.head.append(runtime);
+  }).catch((error) => fail(error.message));
+})();
+`;
+
 type OperatorHttpErrorCode =
   | "BAD_REQUEST"
   | "FORBIDDEN"
   | "NOT_FOUND"
+  | "POLICY_DENIED"
   | "SESSION_CONFLICT"
   | "SERVER_CLOSED";
 
@@ -76,6 +135,7 @@ interface InterventionRecord {
   readonly operatorLeaseTtlMs: number;
   readonly automationLeaseTtlMs: number;
   readonly automationId: string;
+  readonly capabilityHash: Buffer;
   operatorGrant?: ControlGrant;
   claimHash?: Buffer;
   latestObservation?: OperatorObservationSummary;
@@ -213,13 +273,28 @@ function validateDisplayText(value: string, label: string, maxLength = 2_000): s
   return normalized;
 }
 
-function digestClaim(claimId: string): Buffer {
-  return createHash("sha256").update(claimId).digest();
+function digestOpaqueToken(token: string): Buffer {
+  return createHash("sha256").update(token).digest();
 }
 
-function claimMatches(claimId: string, expected: Buffer): boolean {
-  const actual = digestClaim(claimId);
+function opaqueTokenMatches(token: string, expected: Buffer): boolean {
+  const actual = digestOpaqueToken(token);
   return actual.byteLength === expected.byteLength && timingSafeEqual(actual, expected);
+}
+
+function capabilityCookieName(sessionId: string): string {
+  const suffix = createHash("sha256").update(sessionId).digest("hex").slice(0, 24);
+  return `handrail_cap_${suffix}`;
+}
+
+function cookieValues(request: IncomingMessage, name: string): readonly string[] {
+  const header = request.headers.cookie;
+  if (!header) return [];
+  return header
+    .split(";")
+    .map((part) => part.trim().split("=", 2))
+    .filter(([key, value]) => key === name && Boolean(value))
+    .map(([, value]) => value ?? "");
 }
 
 function observationSummary(observation: SurfaceObservation): OperatorObservationSummary {
@@ -253,6 +328,14 @@ function redactedDetails(
   return redacted as Readonly<Record<string, RedactedValue>>;
 }
 
+function effectForOperatorKey(key: string): OperatorAuthorizationContext["effect"] {
+  // Enter and Space can activate an unknown focused control, so they are
+  // conservatively classified as commit operations.
+  if (key === "Enter" || key === "Space") return "commit";
+  if (key === "Backspace" || key === "Delete") return "reversible_write";
+  return "read";
+}
+
 function json(
   response: ServerResponse,
   status: number,
@@ -283,6 +366,7 @@ function errorStatus(error: unknown): number {
       case "BAD_REQUEST":
         return 400;
       case "FORBIDDEN":
+      case "POLICY_DENIED":
         return 403;
       case "NOT_FOUND":
         return 404;
@@ -315,6 +399,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
   readonly #surface: SurfaceAdapter;
   readonly #server: Server;
   readonly #now: () => Date;
+  readonly #authorizeOperatorAction: OperatorActionAuthorizer;
   readonly #auditSink?: OperatorConsoleOptions["auditSink"];
   readonly #captureSink?: OperatorConsoleOptions["captureSink"];
   readonly #records = new Map<string, InterventionRecord>();
@@ -328,6 +413,8 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     this.#control = options.control;
     this.#surface = options.surface;
     this.#now = options.now ?? (() => new Date());
+    this.#authorizeOperatorAction =
+      options.authorizeOperatorAction ?? denyUnconfiguredOperatorAction;
     this.#auditSink = options.auditSink;
     this.#captureSink = options.captureSink;
     this.#server = createServer((request, response) => {
@@ -392,6 +479,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     this.#control.assertGrant(input.automationGrant, "automation");
     this.#control.requestPause(input.automationGrant, reason);
     const waiting = await this.#control.quiesceAutomation(input.automationGrant);
+    const interventionCapability = randomBytes(32).toString("base64url");
 
     const record: InterventionRecord = {
       input,
@@ -406,6 +494,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       operatorLeaseTtlMs,
       automationLeaseTtlMs,
       automationId,
+      capabilityHash: digestOpaqueToken(interventionCapability),
       resuming: false,
       connected: true,
     };
@@ -423,7 +512,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     return {
       runId,
       sessionId,
-      url: `${this.origin}/operator/${encodeURIComponent(sessionId)}`,
+      url: `${this.origin}/operator/${encodeURIComponent(sessionId)}#${CAPABILITY_FRAGMENT_KEY}=${encodeURIComponent(interventionCapability)}`,
       state: () => this.state(sessionId),
       audit: () => this.audit(sessionId),
       captures: () => this.captures(sessionId),
@@ -439,7 +528,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
   audit(sessionId: string): readonly OperatorAuditEvent[] {
     return this.#requireRecord(sessionId).audit.map((event) => ({
       ...event,
-      details: { ...event.details },
+      details: redactedDetails(event.details),
     }));
   }
 
@@ -467,6 +556,55 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       throw new OperatorConsoleError("NOT_FOUND", `Unknown operator session ${sessionId}.`);
     }
     return record;
+  }
+
+  #requireCapability(request: IncomingMessage, record: InterventionRecord): string {
+    const header = request.headers[CAPABILITY_HEADER];
+    if (Array.isArray(header)) {
+      throw new OperatorConsoleError("FORBIDDEN", "Operator capability is missing or invalid.");
+    }
+    const candidates = [
+      ...(typeof header === "string" ? [header] : []),
+      ...cookieValues(request, capabilityCookieName(record.input.session.id)),
+    ];
+    if (
+      candidates.length === 0 ||
+      candidates.some(
+        (candidate) =>
+          candidate.length === 0 ||
+          candidate.length > 256 ||
+          !opaqueTokenMatches(candidate, record.capabilityHash),
+      )
+    ) {
+      throw new OperatorConsoleError("FORBIDDEN", "Operator capability is missing or invalid.");
+    }
+    return candidates[0] ?? "";
+  }
+
+  #bootstrapState(record: InterventionRecord): OperatorConsoleState {
+    const sessionId = record.input.session.id;
+    return {
+      runId: "authorization-pending",
+      sessionId,
+      capability: "Authorization pending",
+      currentStep: "Authorization pending",
+      interventionReason: "Authorize this operator link to load intervention context",
+      stoppedBecause: "Intervention details are hidden until authorization succeeds",
+      control: {
+        sessionId,
+        phase: "AWAITING_OPERATOR",
+        owner: null,
+        epoch: 0,
+        expiresAt: null,
+        reason: null,
+      },
+      viewport: { ...record.input.session.viewport },
+      activities: [],
+      canClaim: false,
+      canAct: false,
+      canResume: false,
+      connected: false,
+    };
   }
 
   #controlSnapshot(sessionId: string) {
@@ -518,6 +656,9 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     details: Readonly<Record<string, unknown>>,
   ): Promise<void> {
     const event: OperatorAuditEvent = {
+      schemaVersion: "1.0.0",
+      eventId: `operator-audit-${randomUUID()}`,
+      type: "operator.audit",
       sequence: record.audit.length + 1,
       timestamp: this.#timestamp(),
       runId: record.runId,
@@ -533,9 +674,12 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     if (!this.#auditSink) return;
 
     try {
-      await this.#auditSink(event);
+      await this.#auditSink({ ...event, details: redactedDetails(event.details) });
     } catch {
       record.audit.push({
+        schemaVersion: "1.0.0",
+        eventId: `operator-audit-${randomUUID()}`,
+        type: "operator.audit",
         sequence: record.audit.length + 1,
         timestamp: this.#timestamp(),
         runId: record.runId,
@@ -594,7 +738,7 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     );
     const claimId = randomBytes(32).toString("base64url");
     record.operatorGrant = grant;
-    record.claimHash = digestClaim(claimId);
+    record.claimHash = digestOpaqueToken(claimId);
     await this.#appendAudit(
       record,
       "control_claimed",
@@ -622,12 +766,72 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       !record.operatorGrant ||
       !record.claimHash ||
       record.operatorGrant.epoch !== epoch ||
-      !claimMatches(claimId, record.claimHash)
+      !opaqueTokenMatches(claimId, record.claimHash)
     ) {
       throw new ControlError("CONTROL_LOST", "The operator claim is stale.");
     }
     this.#control.assertGrant(record.operatorGrant, "operator");
     return record.operatorGrant;
+  }
+
+  async #authorize(
+    record: InterventionRecord,
+    grant: ControlGrant,
+    action: OperatorAuthorizationContext["action"],
+    effect: OperatorAuthorizationContext["effect"],
+    details: Readonly<Record<string, unknown>>,
+  ): Promise<string> {
+    const context: OperatorAuthorizationContext = {
+      requestedAt: this.#timestamp(),
+      runId: record.runId,
+      capability: record.capability,
+      currentStep: record.currentStep,
+      action,
+      effect,
+      session: {
+        ...record.input.session,
+        viewport: { ...record.input.session.viewport },
+      },
+      sessionId: record.input.session.id,
+      ownerEpoch: grant.epoch,
+      operatorId: grant.actor.id,
+      operatorLeaseExpiresAt: grant.expiresAt,
+      details: redactedDetails(details),
+    };
+
+    let decision: unknown;
+    try {
+      decision = await this.#authorizeOperatorAction(context);
+    } catch {
+      throw new OperatorConsoleError(
+        "POLICY_DENIED",
+        "Operator authorization failed closed before the surface action.",
+      );
+    }
+    if (typeof decision !== "object" || decision === null || !("allowed" in decision)) {
+      throw new OperatorConsoleError(
+        "POLICY_DENIED",
+        "Operator authorization returned an invalid decision and failed closed.",
+      );
+    }
+    if (decision.allowed !== true) {
+      throw new OperatorConsoleError(
+        "POLICY_DENIED",
+        `Operator policy denied ${action} for effect ${effect}.`,
+      );
+    }
+    const authorization = "authorization" in decision ? decision.authorization : undefined;
+    if (
+      typeof authorization !== "string" ||
+      !SAFE_IDENTIFIER.test(authorization) ||
+      authorization.length > 128
+    ) {
+      throw new OperatorConsoleError(
+        "POLICY_DENIED",
+        "Operator authorization returned an invalid grant and failed closed.",
+      );
+    }
+    return authorization;
   }
 
   async #click(
@@ -648,6 +852,13 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         "Click coordinates are outside the live viewport.",
       );
     }
+    // A coordinate is not bound to a semantic target, so it may activate a
+    // submit control and must carry the most conservative effect class.
+    const effect = "commit";
+    const authorization = await this.#authorize(record, grant, "activate_coordinate", effect, {
+      x: Math.round(x),
+      y: Math.round(y),
+    });
     const receipt = await this.#surface.clickAt(record.input.session.id, x, y, grant);
     await this.#appendAudit(
       record,
@@ -656,7 +867,14 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       grant.actor.id,
       grant.epoch,
       "Operator clicked the live session",
-      { x: Math.round(x), y: Math.round(y), receiptSummary: receipt.summary },
+      {
+        x: Math.round(x),
+        y: Math.round(y),
+        policyAction: "activate_coordinate",
+        effect,
+        policyGrantMode: authorization,
+        receiptSummary: receipt.summary,
+      },
     );
     return { sessionId: record.input.session.id, epoch: grant.epoch, receipt };
   }
@@ -667,6 +885,11 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
   ): Promise<Readonly<Record<string, unknown>>> {
     const grant = this.#requireClaim(record, body);
     const value = requiredString(body, "value", MAX_TYPED_CHARACTERS);
+    const characterCount = Array.from(value).length;
+    const effect = "reversible_write";
+    const authorization = await this.#authorize(record, grant, "type", effect, {
+      characterCount,
+    });
     const receipt = await this.#surface.typeFocused(record.input.session.id, value, grant);
     await this.#appendAudit(
       record,
@@ -675,7 +898,13 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       grant.actor.id,
       grant.epoch,
       "Operator typed a redacted value into the focused control",
-      { characterCount: Array.from(value).length, receiptSummary: receipt.summary },
+      {
+        characterCount,
+        policyAction: "type",
+        effect,
+        policyGrantMode: authorization,
+        receiptSummary: receipt.summary,
+      },
     );
     return { sessionId: record.input.session.id, epoch: grant.epoch, receipt };
   }
@@ -692,6 +921,8 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
         "Key is not permitted by the operator console.",
       );
     }
+    const effect = effectForOperatorKey(key);
+    const authorization = await this.#authorize(record, grant, "press_key", effect, { key });
     const receipt = await this.#surface.pressKey(record.input.session.id, key, grant);
     await this.#appendAudit(
       record,
@@ -700,7 +931,13 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       grant.actor.id,
       grant.epoch,
       "Operator pressed a permitted key",
-      { key, receiptSummary: receipt.summary },
+      {
+        key,
+        policyAction: "press_key",
+        effect,
+        policyGrantMode: authorization,
+        receiptSummary: receipt.summary,
+      },
     );
     return { sessionId: record.input.session.id, epoch: grant.epoch, receipt };
   }
@@ -710,23 +947,29 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     body: Readonly<Record<string, unknown>>,
   ): Promise<Readonly<Record<string, unknown>>> {
     const grant = this.#requireClaim(record, body);
+    const effect = "read";
+    const authorization = await this.#authorize(record, grant, "capture_evidence", effect, {});
     const screenshotPng = await this.#control.withControl(grant, () =>
       this.#surface.captureEvidence(record.input.session.id, "operator-handoff"),
     );
     assertPng(screenshotPng);
     const sha256 = createHash("sha256").update(screenshotPng).digest("hex");
     const capture: OperatorCapture = {
+      schemaVersion: "1.0.0",
       id: `operator-capture-${randomUUID()}`,
       runId: record.runId,
       sessionId: record.input.session.id,
       capturedAt: this.#timestamp(),
       sha256,
       byteLength: screenshotPng.byteLength,
+      mimeType: "image/png",
       screenshotPng: Buffer.from(screenshotPng),
     };
     record.captures.push(capture);
     if (record.captures.length > MAX_CAPTURES_PER_SESSION) record.captures.shift();
-    if (this.#captureSink) await this.#captureSink(capture);
+    if (this.#captureSink) {
+      await this.#captureSink({ ...capture, screenshotPng: Buffer.from(capture.screenshotPng) });
+    }
     await this.#appendAudit(
       record,
       "evidence_captured",
@@ -734,7 +977,14 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
       grant.actor.id,
       grant.epoch,
       "Evidence captured",
-      { captureId: capture.id, sha256, byteLength: capture.byteLength },
+      {
+        captureId: capture.id,
+        sha256,
+        byteLength: capture.byteLength,
+        policyAction: "capture_evidence",
+        effect,
+        policyGrantMode: authorization,
+      },
     );
     return {
       sessionId: record.input.session.id,
@@ -851,17 +1101,20 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
 
     const requestUrl = new URL(request.url ?? "/", this.origin);
     if (request.method === "GET" && requestUrl.pathname === "/") {
-      const first = this.#records.keys().next().value as string | undefined;
-      if (!first) throw new OperatorConsoleError("NOT_FOUND", "No intervention is open.");
-      response.writeHead(302, { Location: `/operator/${encodeURIComponent(first)}` });
-      response.end();
-      return;
+      throw new OperatorConsoleError(
+        "NOT_FOUND",
+        "Open the exact capability-bearing URL for an operator intervention.",
+      );
     }
     if (request.method === "GET" && requestUrl.pathname === "/operator.css") {
       text(response, 200, OPERATOR_CSS, "text/css; charset=utf-8");
       return;
     }
     if (request.method === "GET" && requestUrl.pathname === "/operator.js") {
+      text(response, 200, OPERATOR_BOOTSTRAP_SCRIPT, "text/javascript; charset=utf-8");
+      return;
+    }
+    if (request.method === "GET" && requestUrl.pathname === "/operator-runtime.js") {
       text(response, 200, OPERATOR_SCRIPT, "text/javascript; charset=utf-8");
       return;
     }
@@ -869,7 +1122,13 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     const segments = requestUrl.pathname.split("/").filter(Boolean);
     if (request.method === "GET" && segments[0] === "operator" && segments.length === 2) {
       const sessionId = decodeURIComponent(segments[1] ?? "");
-      text(response, 200, renderOperatorConsole(this.state(sessionId)), "text/html; charset=utf-8");
+      const record = this.#requireRecord(sessionId);
+      const screenshotSource = `src="/api/sessions/${encodeURIComponent(sessionId)}/screenshot"`;
+      const shell = renderOperatorConsole(this.#bootstrapState(record)).replace(
+        screenshotSource,
+        "",
+      );
+      text(response, 200, shell, "text/html; charset=utf-8");
       return;
     }
     if (segments[0] !== "api" || segments[1] !== "sessions" || segments.length !== 4) {
@@ -879,6 +1138,22 @@ class OperatorConsoleServer implements OperatorConsoleHandle {
     const sessionId = decodeURIComponent(segments[2] ?? "");
     const action = segments[3] ?? "";
     const record = this.#requireRecord(sessionId);
+    if (action === "bootstrap") {
+      if (request.method !== "POST") {
+        throw new OperatorConsoleError("NOT_FOUND", "Operator route not found.");
+      }
+      this.#checkMutationRequest(request);
+      const capability = this.#requireCapability(request, record);
+      const cookieName = capabilityCookieName(record.input.session.id);
+      const cookiePath = `/api/sessions/${encodeURIComponent(record.input.session.id)}/`;
+      response.writeHead(204, {
+        "Content-Length": "0",
+        "Set-Cookie": `${cookieName}=${capability}; HttpOnly; SameSite=Strict; Path=${cookiePath}`,
+      });
+      response.end();
+      return;
+    }
+    this.#requireCapability(request, record);
     if (request.method === "GET" && action === "state") {
       json(response, 200, this.#state(record));
       return;

@@ -11,6 +11,7 @@ import type {
   CommandKind,
   EffectClass,
 } from "../domain/schema.js";
+import type { SurfaceAccessLayer } from "../surface/types.js";
 
 export type PolicyActor = "discovery" | "replay" | "operator" | "system";
 export type RuntimeCommand =
@@ -45,6 +46,8 @@ export interface PolicyStack {
 export interface BoundApproval {
   readonly id: string;
   readonly runId: string;
+  /** Exact replay step or other stable operation identifier authorized once. */
+  readonly operationId: string;
   readonly command?: RuntimeCommand;
   /** Backwards-compatible alias for command. */
   readonly action?: RuntimeCommand;
@@ -71,6 +74,7 @@ export interface PolicyRequest {
   readonly effect: EffectClass;
   readonly actor: PolicyActor;
   readonly runId: string;
+  readonly operationId?: string;
   readonly capabilityDigest?: string;
   readonly sessionId?: string;
   readonly ownerEpoch?: number;
@@ -301,6 +305,21 @@ function invalidLayer(layer: PolicyLayer): string | undefined {
   return undefined;
 }
 
+/** Project each origin/route layer into the browser's network enforcement boundary. */
+export function surfaceAccessPolicy(
+  policy: PolicyStack | readonly PolicyLayer[],
+): readonly SurfaceAccessLayer[] {
+  return layersOf(policy).map((layer) => {
+    const invalid = invalidLayer(layer);
+    if (invalid) throw new TypeError(`Invalid ${layer.name || "unnamed"} policy: ${invalid}.`);
+    return {
+      name: layer.name,
+      ...(layer.allowedOrigins ? { allowedOrigins: [...layer.allowedOrigins] } : {}),
+      ...(layer.allowedRoutes ? { allowedRoutes: [...layer.allowedRoutes] } : {}),
+    };
+  });
+}
+
 function approvalMatches(
   approval: BoundApproval,
   request: PolicyRequest,
@@ -313,6 +332,8 @@ function approvalMatches(
   return (
     approval.id.trim().length > 0 &&
     approval.runId === request.runId &&
+    approval.operationId.trim().length > 0 &&
+    approval.operationId === request.operationId &&
     approvalCommand(approval) === command &&
     approval.effect === request.effect &&
     normalizeExactOrigin(approval.origin) === origin &&
@@ -482,7 +503,7 @@ export function checkPolicy(
         return {
           allowed: false,
           code: "APPROVAL_INVALID",
-          summary: "The approval is expired or is not bound to this exact request.",
+          summary: "The approval is expired or is not bound to this exact operation.",
         };
       }
       authorization = "bound_approval";

@@ -28,6 +28,7 @@ import type {
   ObservedElement,
   PredicateContext,
   PredicateResult,
+  SurfaceAccessLayer,
   SurfaceAdapter,
   SurfaceObservation,
   SurfaceSession,
@@ -43,9 +44,11 @@ export interface BrowserSurfaceOptions {
 interface SessionRecord {
   descriptor: SurfaceSession;
   binding: AppBinding;
+  accessPolicy: readonly SurfaceAccessLayer[];
   context: BrowserContext;
   page: Page;
   hasNavigated: boolean;
+  additionalPageDetected: boolean;
   latestObservationId?: string;
 }
 
@@ -77,6 +80,7 @@ interface RawElementInfo {
 interface DeclarativeNavigationTarget {
   url: string;
   kind: "link" | "form";
+  target: string;
 }
 
 const ELEMENT_SELECTOR = "input, button, select, textarea, a[href], [role], td, th";
@@ -280,14 +284,29 @@ const INSPECT_ELEMENT_FUNCTION = Function(
 )() as (element: HTMLElement) => RawElementInfo;
 
 const NAVIGATION_TARGET_EXPRESSION = `(element) => {
+    const effectiveTarget = (explicitTarget, ownerDocument) => {
+      const inheritedTarget = ownerDocument.querySelector("base[target]")?.getAttribute("target");
+      return (explicitTarget || inheritedTarget || "_self").trim().toLowerCase();
+    };
     const anchor = element.closest("a[href]");
     if (anchor instanceof HTMLAnchorElement) {
-      return { url: anchor.href, kind: "link" };
+      return {
+        url: anchor.href,
+        kind: "link",
+        target: effectiveTarget(anchor.getAttribute("target"), anchor.ownerDocument),
+      };
     }
     if (element instanceof HTMLButtonElement || element instanceof HTMLInputElement) {
       const type = (element.type || "submit").toLowerCase();
       if ((type === "submit" || type === "image") && element.form) {
-        return { url: element.formAction || element.form.action, kind: "form" };
+        return {
+          url: element.formAction || element.form.action,
+          kind: "form",
+          target: effectiveTarget(
+            element.getAttribute("formtarget") || element.form.getAttribute("target"),
+            element.ownerDocument,
+          ),
+        };
       }
     }
     return undefined;
@@ -319,18 +338,22 @@ async function visibleHandles(locator: Locator): Promise<Array<ElementHandle<HTM
   return handles;
 }
 
-function surfaceSignature(page: Page): Promise<string> {
-  return Promise.all([
-    Promise.resolve(page.url()),
-    page
-      .locator("body")
-      .innerText({ timeout: 1_000 })
-      .catch(() => ""),
-  ]).then(([url, text]) =>
-    createHash("sha256")
-      .update(`${routeOnly(url)}\n${normalizedText(text)}`)
-      .digest("hex"),
+async function surfaceSignature(page: Page): Promise<string> {
+  const frames = await Promise.all(
+    page.frames().map(async (frame) => ({
+      name: frame.name(),
+      route: routeOnly(frame.url()),
+      text: normalizedText(
+        await frame
+          .locator("body")
+          .innerText({ timeout: 1_000 })
+          .catch(() => ""),
+      ),
+    })),
   );
+  return createHash("sha256")
+    .update(frames.map((frame) => `${frame.name}\n${frame.route}\n${frame.text}`).join("\n---\n"))
+    .digest("hex");
 }
 
 function matcherPasses(
@@ -347,9 +370,7 @@ function matcherPasses(
     case "contains":
       return actual.includes(expected);
     case "regex":
-      return new RegExp(predicate.matcher.value, predicate.matcher.caseSensitive ? "u" : "iu").test(
-        value,
-      );
+      throw new TypeError("Artifact text predicates support exact or contains matching only.");
   }
 }
 
@@ -390,11 +411,19 @@ export class BrowserSurface implements SurfaceAdapter {
     const browser = await chromium.launch({
       headless: options.headless ?? true,
       slowMo: options.slowMoMs ?? 0,
+      args: [
+        "--disable-quic",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+      ],
     });
     return new BrowserSurface(browser, options);
   }
 
-  async createSession(binding: AppBinding): Promise<SurfaceSession> {
+  async createSession(
+    binding: AppBinding,
+    accessPolicy: readonly SurfaceAccessLayer[] = [],
+  ): Promise<SurfaceSession> {
     const id = `surface-${randomUUID()}`;
     const context = await this.#browser.newContext({
       viewport: this.#viewport,
@@ -402,8 +431,40 @@ export class BrowserSurface implements SurfaceAdapter {
       timezoneId: "UTC",
       reducedMotion: "reduce",
       colorScheme: "light",
+      serviceWorkers: "block",
+    });
+    await context.addInitScript(() => {
+      for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "WebTransport"]) {
+        try {
+          Object.defineProperty(globalThis, name, {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: undefined,
+          });
+        } catch {
+          // Chromium launch policy remains the second transport boundary if a
+          // future engine makes one of these globals non-configurable.
+        }
+      }
+      try {
+        Object.defineProperty(globalThis, "open", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: undefined,
+        });
+      } catch {
+        // The context-level page invariant below remains the fail-safe boundary.
+      }
     });
     let bootstrapComplete = false;
+    await context.routeWebSocket("**/*", async (webSocket) => {
+      await webSocket.close({
+        code: 1008,
+        reason: "WebSocket transport is outside the declared HTTP surface policy.",
+      });
+    });
     await context.route("**/*", async (route) => {
       const request = route.request();
       const url = request.url();
@@ -421,7 +482,7 @@ export class BrowserSurface implements SurfaceAdapter {
         return;
       }
       try {
-        this.#assertUrlAllowed(binding, url);
+        this.#assertUrlAllowed(binding, url, accessPolicy);
       } catch {
         await route.abort("blockedbyclient");
         return;
@@ -436,7 +497,25 @@ export class BrowserSurface implements SurfaceAdapter {
       createdAt: isoNow(),
       viewport: { ...this.#viewport },
     };
-    this.#sessions.set(id, { descriptor, binding, context, page, hasNavigated: false });
+    const record: SessionRecord = {
+      descriptor,
+      binding,
+      accessPolicy: accessPolicy.map((layer) => ({
+        name: layer.name,
+        ...(layer.allowedOrigins ? { allowedOrigins: [...layer.allowedOrigins] } : {}),
+        ...(layer.allowedRoutes ? { allowedRoutes: [...layer.allowedRoutes] } : {}),
+      })),
+      context,
+      page,
+      hasNavigated: false,
+      additionalPageDetected: false,
+    };
+    context.on("page", (candidate) => {
+      if (candidate === page) return;
+      record.additionalPageDetected = true;
+      void candidate.close().catch(() => undefined);
+    });
+    this.#sessions.set(id, record);
     return descriptor;
   }
 
@@ -450,7 +529,7 @@ export class BrowserSurface implements SurfaceAdapter {
     const record = this.#requireSession(sessionId);
     await this.#validateReadySurface(record);
     throwIfAborted(signal);
-    this.#assertUrlAllowed(record.binding, url);
+    this.#assertUrlAllowed(record.binding, url, record.accessPolicy);
     return this.#control.withControl(grant, async () => {
       throwIfAborted(signal);
       const startedAt = isoNow();
@@ -477,6 +556,7 @@ export class BrowserSurface implements SurfaceAdapter {
     throwIfAborted(signal);
     const session = this.#requireSession(sessionId);
     await this.#validateReadySurface(session);
+    const observationUrl = session.page.url();
     throwIfAborted(signal);
     await this.#discardLatestObservation(session);
     const observationId = `observation-${randomUUID()}`;
@@ -535,43 +615,61 @@ export class BrowserSurface implements SurfaceAdapter {
       }
     }
 
-    const screenshotPng = await session.page.screenshot({
-      type: "png",
-      animations: "disabled",
-      caret: "hide",
-    });
-    throwIfAborted(signal);
-    const stableSignals = observed.map((element) => ({
-      framePath: element.framePath,
-      role: element.role,
-      name: element.context.columnLabel ? undefined : element.name,
-      precedingLabel: element.context.precedingLabel,
-      rowLabel: element.context.rowLabel,
-      columnLabel: element.context.columnLabel,
-      tableCaption: element.context.tableCaption,
-    }));
-    const fingerprint = createHash("sha256")
-      .update(
-        JSON.stringify({
-          route: routeOnly(session.page.url()),
-          title: await session.page.title(),
-          frames: session.page.frames().map(frameSegment),
-          stableSignals,
-        }),
-      )
-      .digest("hex");
-    const observation: SurfaceObservation = {
-      id: observationId,
-      sessionId,
-      route: routeOnly(session.page.url()),
-      title: await session.page.title(),
-      capturedAt: isoNow(),
-      screenshotPng,
-      viewport: { ...session.descriptor.viewport },
-      visibleText: frameTexts.join("\n\n").slice(0, 16_000),
-      elements: observed,
-      fingerprint,
-    };
+    let observation: SurfaceObservation;
+    try {
+      const screenshotPng = await session.page.screenshot({
+        type: "png",
+        animations: "disabled",
+        caret: "hide",
+      });
+      throwIfAborted(signal);
+      const title = await session.page.title();
+      await this.#postValidateSurface(session);
+      const finalUrl = session.page.url();
+      if (finalUrl !== observationUrl) {
+        throw new SurfaceResolutionError(
+          "STALE_OBSERVATION",
+          "Surface URL changed while the observation was being captured.",
+        );
+      }
+      const stableSignals = observed.map((element) => ({
+        framePath: element.framePath,
+        role: element.role,
+        name: element.context.columnLabel ? undefined : element.name,
+        precedingLabel: element.context.precedingLabel,
+        rowLabel: element.context.rowLabel,
+        columnLabel: element.context.columnLabel,
+        tableCaption: element.context.tableCaption,
+      }));
+      const fingerprint = createHash("sha256")
+        .update(
+          JSON.stringify({
+            route: routeOnly(finalUrl),
+            title,
+            frames: session.page.frames().map(frameSegment),
+            stableSignals,
+          }),
+        )
+        .digest("hex");
+      observation = {
+        id: observationId,
+        sessionId,
+        url: finalUrl,
+        route: routeOnly(finalUrl),
+        title,
+        capturedAt: isoNow(),
+        screenshotPng,
+        viewport: { ...session.descriptor.viewport },
+        visibleText: frameTexts.join("\n\n").slice(0, 16_000),
+        elements: observed,
+        fingerprint,
+      };
+    } catch (error) {
+      await Promise.all(
+        [...elements.values()].map((element) => element.handle.dispose().catch(() => undefined)),
+      );
+      throw error;
+    }
     this.#observations.set(observationId, { observation, elements });
     session.latestObservationId = observationId;
     return observation;
@@ -584,17 +682,17 @@ export class BrowserSurface implements SurfaceAdapter {
   ): Promise<ActionReceipt> {
     throwIfAborted(context.signal);
     const session = this.#requireSession(sessionId);
-    await this.#validateReadySurface(session);
-    throwIfAborted(context.signal);
     if (decision.observationId !== context.observationId) {
       throw new SurfaceResolutionError(
         "STALE_OBSERVATION",
         "Decision and dispatch observation IDs differ.",
       );
     }
-    const observation = this.#requireObservation(session, context.observationId);
     return this.#control.withControl(context.grant, async () => {
       throwIfAborted(context.signal);
+      await this.#postValidateSurface(session);
+      this.#assertExpectedUrl(session, context.expectedUrl);
+      const observation = this.#requireObservation(session, context.observationId);
       const startedAt = isoNow();
       const started = Date.now();
       const before = await surfaceSignature(session.page);
@@ -630,12 +728,17 @@ export class BrowserSurface implements SurfaceAdapter {
         case "activate":
           if (!element)
             throw new SurfaceResolutionError("TARGET_NOT_FOUND", "Missing activation target.");
-          await this.#assertDeclarativeNavigationAllowed(session.binding, element.handle);
+          await this.#assertDeclarativeNavigationAllowed(session, element.handle);
           throwIfAborted(context.signal);
           await element.handle.click();
           throwIfAborted(context.signal);
           break;
         case "activate_coordinate":
+          await this.#assertCoordinateNavigationAllowed(
+            session,
+            decision.x * session.descriptor.viewport.width,
+            decision.y * session.descriptor.viewport.height,
+          );
           await session.page.mouse.click(
             decision.x * session.descriptor.viewport.width,
             decision.y * session.descriptor.viewport.height,
@@ -658,9 +761,7 @@ export class BrowserSurface implements SurfaceAdapter {
 
       if (decision.kind !== "wait") await session.page.waitForTimeout(40);
       throwIfAborted(context.signal);
-      if (decision.kind === "activate" || decision.kind === "activate_coordinate") {
-        await this.#postValidateSurface(session);
-      }
+      await this.#postValidateSurface(session);
       const after = await surfaceSignature(session.page);
       return {
         command: decision.kind,
@@ -777,28 +878,36 @@ export class BrowserSurface implements SurfaceAdapter {
     context: PredicateContext,
     signal?: AbortSignal,
   ): Promise<PredicateResult> {
-    throwIfAborted(signal);
-    await this.#validateReadySurface(this.#requireSession(sessionId));
-    throwIfAborted(signal);
-    if (predicate.kind === "all" || predicate.kind === "any") {
-      const results = await Promise.all(
-        predicate.predicates.map((item) => this.#evaluateAtomic(sessionId, item, context)),
-      );
+    const session = this.#requireSession(sessionId);
+    const operation = async (): Promise<PredicateResult> => {
       throwIfAborted(signal);
-      const passed =
-        predicate.kind === "all"
-          ? results.every((item) => item.passed)
-          : results.some((item) => item.passed);
-      return { passed, observed: results.map((item) => item.observed).join("; ") };
-    }
-    if (predicate.kind === "not") {
-      const result = await this.#evaluateAtomic(sessionId, predicate.predicate, context);
+      await this.#validateReadySurface(session);
+      this.#assertExpectedUrl(session, context.expectedUrl);
       throwIfAborted(signal);
-      return { passed: !result.passed, observed: `not (${result.observed})` };
-    }
-    const result = await this.#evaluateAtomic(sessionId, predicate, context);
-    throwIfAborted(signal);
-    return result;
+      let result: PredicateResult;
+      if (predicate.kind === "all" || predicate.kind === "any") {
+        const results = await Promise.all(
+          predicate.predicates.map((item) => this.#evaluateAtomic(sessionId, item, context)),
+        );
+        throwIfAborted(signal);
+        const passed =
+          predicate.kind === "all"
+            ? results.every((item) => item.passed)
+            : results.some((item) => item.passed);
+        result = { passed, observed: results.map((item) => item.observed).join("; ") };
+      } else if (predicate.kind === "not") {
+        const atomic = await this.#evaluateAtomic(sessionId, predicate.predicate, context);
+        throwIfAborted(signal);
+        result = { passed: !atomic.passed, observed: `not (${atomic.observed})` };
+      } else {
+        result = await this.#evaluateAtomic(sessionId, predicate, context);
+        throwIfAborted(signal);
+      }
+      await this.#postValidateSurface(session);
+      this.#assertExpectedUrl(session, context.expectedUrl);
+      return result;
+    };
+    return context.grant ? this.#control.withControl(context.grant, operation) : operation();
   }
 
   async extract(
@@ -806,22 +915,31 @@ export class BrowserSurface implements SurfaceAdapter {
     target: TargetSpec,
     extractor: ExtractorSpec,
     signal?: AbortSignal,
+    grant?: ControlGrant,
+    expectedUrl?: string,
   ): Promise<unknown> {
-    throwIfAborted(signal);
-    await this.#validateReadySurface(this.#requireSession(sessionId));
-    throwIfAborted(signal);
-    const handle = await this.#resolveTarget(sessionId, target);
-    throwIfAborted(signal);
-    let value: unknown;
-    if (extractor.kind === "target_text") {
-      value = await handle.innerText();
-    } else if (extractor.kind === "target_value") {
-      value = await handle.inputValue();
-    } else {
-      value = await handle.getAttribute(extractor.attribute);
-    }
-    throwIfAborted(signal);
-    return applyTransforms(value, extractor.transforms);
+    const session = this.#requireSession(sessionId);
+    const operation = async (): Promise<unknown> => {
+      throwIfAborted(signal);
+      await this.#validateReadySurface(session);
+      this.#assertExpectedUrl(session, expectedUrl);
+      throwIfAborted(signal);
+      const handle = await this.#resolveTarget(sessionId, target);
+      throwIfAborted(signal);
+      let value: unknown;
+      if (extractor.kind === "target_text") {
+        value = await handle.innerText();
+      } else if (extractor.kind === "target_value") {
+        value = await handle.inputValue();
+      } else {
+        value = await handle.getAttribute(extractor.attribute);
+      }
+      throwIfAborted(signal);
+      await this.#postValidateSurface(session);
+      this.#assertExpectedUrl(session, expectedUrl);
+      return applyTransforms(value, extractor.transforms);
+    };
+    return grant ? this.#control.withControl(grant, operation) : operation();
   }
 
   resolveValue(expression: ValueExpression, inputs: Record<string, unknown>): unknown {
@@ -840,18 +958,30 @@ export class BrowserSurface implements SurfaceAdapter {
     }
   }
 
-  async captureEvidence(sessionId: string, _label: string, signal?: AbortSignal): Promise<Buffer> {
-    throwIfAborted(signal);
+  async captureEvidence(
+    sessionId: string,
+    _label: string,
+    signal?: AbortSignal,
+    expectedUrl?: string,
+    grant?: ControlGrant,
+  ): Promise<Buffer> {
     const session = this.#requireSession(sessionId);
-    await this.#validateReadySurface(session);
-    throwIfAborted(signal);
-    const screenshot = await session.page.screenshot({
-      type: "png",
-      animations: "disabled",
-      caret: "hide",
-    });
-    throwIfAborted(signal);
-    return screenshot;
+    const operation = async (): Promise<Buffer> => {
+      throwIfAborted(signal);
+      await this.#validateReadySurface(session);
+      this.#assertExpectedUrl(session, expectedUrl);
+      throwIfAborted(signal);
+      const screenshot = await session.page.screenshot({
+        type: "png",
+        animations: "disabled",
+        caret: "hide",
+      });
+      throwIfAborted(signal);
+      await this.#postValidateSurface(session);
+      this.#assertExpectedUrl(session, expectedUrl);
+      return screenshot;
+    };
+    return grant ? this.#control.withControl(grant, operation) : operation();
   }
 
   async pressKey(
@@ -859,6 +989,7 @@ export class BrowserSurface implements SurfaceAdapter {
     key: string,
     grant: ControlGrant,
     signal?: AbortSignal,
+    expectedUrl?: string,
   ): Promise<ActionReceipt> {
     throwIfAborted(signal);
     const session = this.#requireSession(sessionId);
@@ -866,8 +997,13 @@ export class BrowserSurface implements SurfaceAdapter {
     throwIfAborted(signal);
     return this.#control.withControl(grant, async () => {
       throwIfAborted(signal);
+      await this.#postValidateSurface(session);
+      this.#assertExpectedUrl(session, expectedUrl);
       const startedAt = isoNow();
       const started = Date.now();
+      if (key === "Enter" || key === "Space") {
+        await this.#assertFocusedNavigationAllowed(session);
+      }
       await session.page.keyboard.press(key);
       throwIfAborted(signal);
       await this.#postValidateSurface(session);
@@ -887,6 +1023,7 @@ export class BrowserSurface implements SurfaceAdapter {
     x: number,
     y: number,
     grant: ControlGrant,
+    expectedUrl?: string,
   ): Promise<ActionReceipt> {
     const session = this.#requireSession(sessionId);
     await this.#validateReadySurface(session);
@@ -899,8 +1036,11 @@ export class BrowserSurface implements SurfaceAdapter {
       throw new Error("Operator click is outside the live viewport.");
     }
     return this.#control.withControl(grant, async () => {
+      await this.#postValidateSurface(session);
+      this.#assertExpectedUrl(session, expectedUrl);
       const startedAt = isoNow();
       const started = Date.now();
+      await this.#assertCoordinateNavigationAllowed(session, x, y);
       await session.page.mouse.click(x, y);
       await this.#postValidateSurface(session);
       return {
@@ -914,10 +1054,17 @@ export class BrowserSurface implements SurfaceAdapter {
     });
   }
 
-  async typeFocused(sessionId: string, value: string, grant: ControlGrant): Promise<ActionReceipt> {
+  async typeFocused(
+    sessionId: string,
+    value: string,
+    grant: ControlGrant,
+    expectedUrl?: string,
+  ): Promise<ActionReceipt> {
     const session = this.#requireSession(sessionId);
     await this.#validateReadySurface(session);
     return this.#control.withControl(grant, async () => {
+      await this.#postValidateSurface(session);
+      this.#assertExpectedUrl(session, expectedUrl);
       const startedAt = isoNow();
       const started = Date.now();
       await session.page.keyboard.type(value);
@@ -1257,11 +1404,54 @@ export class BrowserSurface implements SurfaceAdapter {
   }
 
   async #assertDeclarativeNavigationAllowed(
-    binding: AppBinding,
+    session: SessionRecord,
     handle: ElementHandle<HTMLElement>,
   ): Promise<void> {
     const target = await declarativeNavigationTarget(handle);
-    if (target) this.#assertUrlAllowed(binding, target.url);
+    if (!target) return;
+    if (target.target !== "" && target.target !== "_self") {
+      throw new Error(
+        `Surface ${target.kind} activation cannot open target ${target.target}; browser sessions are single-page.`,
+      );
+    }
+    this.#assertUrlAllowed(session.binding, target.url, session.accessPolicy);
+  }
+
+  async #assertCoordinateNavigationAllowed(
+    session: SessionRecord,
+    x: number,
+    y: number,
+  ): Promise<void> {
+    const handle = await session.page.evaluateHandle(
+      ({ pointX, pointY }) => document.elementFromPoint(pointX, pointY),
+      { pointX: x, pointY: y },
+    );
+    const element = handle.asElement();
+    try {
+      if (element) {
+        await this.#assertDeclarativeNavigationAllowed(
+          session,
+          element as ElementHandle<HTMLElement>,
+        );
+      }
+    } finally {
+      await handle.dispose();
+    }
+  }
+
+  async #assertFocusedNavigationAllowed(session: SessionRecord): Promise<void> {
+    const handle = await session.page.evaluateHandle(() => document.activeElement);
+    const element = handle.asElement();
+    try {
+      if (element) {
+        await this.#assertDeclarativeNavigationAllowed(
+          session,
+          element as ElementHandle<HTMLElement>,
+        );
+      }
+    } finally {
+      await handle.dispose();
+    }
   }
 
   async #validateReadySurface(session: SessionRecord): Promise<void> {
@@ -1270,8 +1460,21 @@ export class BrowserSurface implements SurfaceAdapter {
 
   async #postValidateSurface(session: SessionRecord): Promise<void> {
     try {
-      for (const frame of session.page.frames()) {
-        this.#assertUrlAllowed(session.binding, frame.url());
+      const pages = session.context.pages();
+      if (
+        session.additionalPageDetected ||
+        pages.length !== 1 ||
+        pages[0] !== session.page ||
+        session.page.isClosed()
+      ) {
+        throw new Error(
+          "Surface attempted to open a popup or additional page outside the single-page session boundary.",
+        );
+      }
+      for (const page of pages) {
+        for (const frame of page.frames()) {
+          this.#assertUrlAllowed(session.binding, frame.url(), session.accessPolicy);
+        }
       }
     } catch (error) {
       await this.#discardLatestObservation(session);
@@ -1281,7 +1484,11 @@ export class BrowserSurface implements SurfaceAdapter {
     }
   }
 
-  #assertUrlAllowed(binding: AppBinding, url: string): void {
+  #assertUrlAllowed(
+    binding: AppBinding,
+    url: string,
+    accessPolicy: readonly SurfaceAccessLayer[] = [],
+  ): void {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error(`Surface navigation must use HTTP(S); received ${parsed.protocol}`);
@@ -1294,6 +1501,37 @@ export class BrowserSurface implements SurfaceAdapter {
     }
     if (!binding.policy.allowedRoutes.some((pattern) => routeMatches(pattern, parsed.pathname))) {
       throw new Error(`Route ${parsed.pathname} is outside the surface binding allowlist.`);
+    }
+    for (const layer of accessPolicy) {
+      if (
+        layer.allowedOrigins !== undefined &&
+        !layer.allowedOrigins.some((origin) => {
+          try {
+            return new URL(origin).origin === parsed.origin;
+          } catch {
+            return false;
+          }
+        })
+      ) {
+        throw new Error(`Origin ${parsed.origin} is outside effective policy layer ${layer.name}.`);
+      }
+      if (
+        layer.allowedRoutes !== undefined &&
+        !layer.allowedRoutes.some((pattern) => routeMatches(pattern, parsed.pathname))
+      ) {
+        throw new Error(
+          `Route ${parsed.pathname} is outside effective policy layer ${layer.name}.`,
+        );
+      }
+    }
+  }
+
+  #assertExpectedUrl(session: SessionRecord, expectedUrl: string | undefined): void {
+    if (expectedUrl === undefined) return;
+    const currentUrl = session.page.url();
+    this.#assertUrlAllowed(session.binding, currentUrl, session.accessPolicy);
+    if (currentUrl !== expectedUrl) {
+      throw new Error("Surface URL changed after policy authorization.");
     }
   }
 }

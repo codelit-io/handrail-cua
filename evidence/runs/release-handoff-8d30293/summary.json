@@ -1,0 +1,64 @@
+{
+  "kind": "replay",
+  "scenario": "handoff",
+  "result": {
+    "status": "succeeded",
+    "outputs": {
+      "savingsBalance": "[REDACTED:INTERNAL]"
+    },
+    "checkpointEvidence": [
+      {
+        "id": "ev_b22049fd9429a75dfa49eee1",
+        "kind": "screenshot",
+        "relativePath": "screenshots/release-handoff-8d30293-terminal-checkpoint.png",
+        "sha256": "b22049fd9429a75dfa49eee1721f40a6e56fcf2e66b030473eca458039572dcf",
+        "byteLength": 88088,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T18:30:26.825Z"
+      }
+    ],
+    "meta": {
+      "runId": "release-handoff-8d30293",
+      "artifactId": "member.balance.lookup",
+      "artifactDigest": "4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11",
+      "sessionId": "surface-bb016f52-690f-4b53-b301-42b1293618e0",
+      "startedAt": "2026-08-28T18:26:59.335Z",
+      "finishedAt": "2026-08-28T18:30:26.825Z",
+      "durationMs": 207490,
+      "modelCalls": 0,
+      "ownerEpoch": 5
+    }
+  },
+  "handoff": {
+    "interventionId": "handoff-release-handoff-8d30293",
+    "reason": "SESSION_EXPIRED",
+    "originalSessionId": "surface-bb016f52-690f-4b53-b301-42b1293618e0",
+    "resumedSessionId": "surface-bb016f52-690f-4b53-b301-42b1293618e0",
+    "sameSession": true,
+    "automationEpochBefore": 1,
+    "operatorEpoch": 3,
+    "automationEpochAfter": 4,
+    "checkpointPassed": true,
+    "operatorAuditEvents": 11,
+    "evidence": [
+      {
+        "id": "ev_f0e06affe0e826ebc069ff88",
+        "kind": "screenshot",
+        "relativePath": "screenshots/operator-capture-9746f582-90c7-45a2-9f7b-8acb3e59412a.png",
+        "sha256": "f0e06affe0e826ebc069ff88635a3db3a01f0096776a3ef5bf1c82fc2cd613dd",
+        "byteLength": 70377,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T18:27:41.679Z"
+      },
+      {
+        "id": "ev_a01e81cd81df270b1d95780b",
+        "kind": "screenshot",
+        "relativePath": "screenshots/operator-capture-d3364151-4dc4-4a7f-b6a0-18bb1319c60f.png",
+        "sha256": "a01e81cd81df270b1d95780bc10a8eaf77afa1c8c7149157c9a249f4ab259369",
+        "byteLength": 59557,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T18:30:11.904Z"
+      }
+    ]
+  }
+}

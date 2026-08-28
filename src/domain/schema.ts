@@ -545,6 +545,17 @@ export const ArtifactApprovalSchema = z
   .strict();
 export type ArtifactApproval = z.infer<typeof ArtifactApprovalSchema>;
 
+export const TargetOverrideReviewSchema = z
+  .object({
+    baseTargetDigest: Sha256Schema,
+    overrideTargetDigest: Sha256Schema,
+    reviewedBy: IdentifierSchema,
+    reviewedAt: IsoTimestampSchema,
+    expiresAt: IsoTimestampSchema.optional(),
+  })
+  .strict();
+export type TargetOverrideReview = z.infer<typeof TargetOverrideReviewSchema>;
+
 export const SecretBindingSchema = z
   .object({
     brokerKey: IdentifierSchema,
@@ -577,9 +588,32 @@ export const AppBindingSchema = z
     secretRefs: z.record(IdentifierSchema, SecretBindingSchema),
     expectedFingerprint: FingerprintRuleSchema,
     targetOverrides: z.record(IdentifierSchema, TargetSpecSchema),
+    targetOverrideReviews: z.record(IdentifierSchema, TargetOverrideReviewSchema).optional(),
     policy: BindingPolicySchema,
   })
-  .strict();
+  .strict()
+  .superRefine((binding, context) => {
+    const overrideNames = new Set(Object.keys(binding.targetOverrides));
+    const reviewNames = new Set(Object.keys(binding.targetOverrideReviews ?? {}));
+    for (const targetName of overrideNames) {
+      if (!reviewNames.has(targetName)) {
+        context.addIssue({
+          code: "custom",
+          path: ["targetOverrideReviews", targetName],
+          message: "Every target override requires a digest-bound review record.",
+        });
+      }
+    }
+    for (const targetName of reviewNames) {
+      if (!overrideNames.has(targetName)) {
+        context.addIssue({
+          code: "custom",
+          path: ["targetOverrideReviews", targetName],
+          message: "A target override review cannot exist without its target override.",
+        });
+      }
+    }
+  });
 export type AppBinding = z.infer<typeof AppBindingSchema>;
 
 const ModelDecisionBaseShape = {
@@ -694,6 +728,13 @@ export const AutomationFaultSchema = z
     stepId: IdentifierSchema.optional(),
     expected: z.string().max(2_000).optional(),
     observed: z.string().max(2_000).optional(),
+    diagnostic: z
+      .object({
+        expectedCategory: IdentifierSchema,
+        observedCategory: IdentifierSchema,
+      })
+      .strict()
+      .optional(),
     evidence: z.array(EvidenceRefSchema).max(20),
   })
   .strict();

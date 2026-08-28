@@ -3,13 +3,21 @@ import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import { createDemoBinding, createDemoPolicyStack } from "../src/demo/config.js";
 import {
+  type AppBinding,
+  type ArtifactApproval,
+  type CapabilityArtifact,
   type CapabilityArtifactDraft,
   type ModelDecision,
   RunResultSchema,
 } from "../src/domain/schema.js";
-import { compileArtifact } from "../src/runtime/artifact.js";
+import {
+  compileArtifact,
+  computeArtifactApprovalDigest,
+  computeTargetDigest,
+} from "../src/runtime/artifact.js";
 import { ControlCoordinator, ControlError, type ControlGrant } from "../src/runtime/control.js";
-import { ReplayEngine } from "../src/runtime/replay.js";
+import type { BoundApproval } from "../src/runtime/policy.js";
+import { ReplayEngine, replayCapability } from "../src/runtime/replay.js";
 import { BrowserSurface } from "../src/surface/browser-surface.js";
 import type { ActionReceipt, DispatchContext } from "../src/surface/types.js";
 import { startLegacyTarget } from "../src/target/server.js";
@@ -28,6 +36,7 @@ function engine(surface: FakeReplaySurface): ReplayEngine {
     surface,
     control: new ControlCoordinator(),
     platformPolicy,
+    artifactApprovalMode: "non_strict",
     now: () => new Date("2026-08-27T18:00:00.000Z"),
     sleep: async () => undefined,
   });
@@ -141,12 +150,99 @@ class UncooperativeDelayedSurface extends FakeReplaySurface {
   }
 }
 
+class ControlCheckingEvidenceSurface extends FakeReplaySurface {
+  constructor(
+    readonly control: ControlCoordinator,
+    terminalCheckpointFails = false,
+  ) {
+    super("none", terminalCheckpointFails);
+  }
+
+  override async captureEvidence(
+    _sessionId: string,
+    _label: string,
+    _signal?: AbortSignal,
+    _expectedUrl?: string,
+    grant?: ControlGrant,
+  ): Promise<Buffer> {
+    assert.ok(grant);
+    this.control.assertGrant(grant, "automation");
+    return super.captureEvidence(_sessionId, _label, _signal, _expectedUrl, grant);
+  }
+}
+
 function artifactWithFirstStepTimeout(timeoutMs: number) {
   const { digest: _digest, ...draft } = structuredClone(replayArtifact());
   return compileArtifact({
     ...draft,
     steps: draft.steps.map((step, index) => (index === 0 ? { ...step, timeoutMs } : step)),
   });
+}
+
+function strictEngine(surface: FakeReplaySurface): ReplayEngine {
+  return new ReplayEngine({
+    surface,
+    control: new ControlCoordinator(),
+    platformPolicy,
+    artifactApprovalMode: "strict",
+    now: () => new Date("2026-08-27T18:00:00.000Z"),
+    sleep: async () => undefined,
+  });
+}
+
+function artifactApproval(artifact: CapabilityArtifact): ArtifactApproval {
+  return {
+    artifactId: artifact.id,
+    revision: artifact.revision,
+    digest: artifact.digest,
+    approvedBy: "reviewer-01",
+    approvedAt: "2026-08-27T18:00:00.000Z",
+    expiresAt: "2026-08-27T19:00:00.000Z",
+  };
+}
+
+function commitArtifact(failingPostcondition = false): CapabilityArtifact {
+  const { digest: _digest, ...draft } = structuredClone(replayArtifact());
+  const commitStep = draft.steps[1];
+  assert.ok(commitStep?.command === "activate");
+  commitStep.effect = "commit";
+  commitStep.idempotency = "non_idempotent";
+  commitStep.retry = {
+    maxAttempts: 1,
+    delayMs: 0,
+    retryOn: failingPostcondition ? ["postcondition_timeout"] : [],
+  };
+  if (failingPostcondition) {
+    commitStep.postcondition = {
+      kind: "target_visible",
+      target: "resultsPanel",
+      expected: false,
+    };
+  }
+  draft.effects.push("commit");
+  draft.policyRequirements.allowedEffects.push("commit");
+  draft.policyRequirements.approvalRequiredFor.push("commit");
+  return compileArtifact(draft);
+}
+
+function commitBinding(): AppBinding {
+  const binding = structuredClone(replayBinding());
+  binding.policy.allowedEffects.push("commit");
+  return binding;
+}
+
+function commitApproval(artifact: CapabilityArtifact, runId: string): BoundApproval {
+  return {
+    id: "commit-approval-01",
+    runId,
+    operationId: "activate-lookup",
+    command: "activate",
+    effect: "commit",
+    origin: "http://127.0.0.1:4312",
+    route: "/legacy",
+    expiresAt: "2026-08-27T19:00:00.000Z",
+    capabilityDigest: artifact.digest,
+  };
 }
 
 describe("deterministic capability replay", () => {
@@ -191,6 +287,116 @@ describe("deterministic capability replay", () => {
     assert.equal(RunResultSchema.safeParse(result).success, true);
   });
 
+  it("captures business-outcome evidence before completing its automation lease", async () => {
+    const control = new ControlCoordinator();
+    const surface = new ControlCheckingEvidenceSurface(control);
+    const screenshotRef = {
+      id: "ev_aaaaaaaaaaaaaaaaaaaaaaaa",
+      kind: "screenshot" as const,
+      relativePath: "screenshots/outcome.png",
+      sha256: "a".repeat(64),
+      byteLength: 8,
+      mimeType: "image/png" as const,
+      createdAt: "2026-08-27T18:00:00.000Z",
+    };
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      screenshotRedactionVerified: true,
+      evidence: {
+        appendEvent: async (_event) => ({
+          eventId: "event-outcome",
+          relativePath: "events.jsonl",
+          byteOffset: 0,
+          byteLength: 1,
+          lineSha256: "b".repeat(64),
+        }),
+        eventLogRef: async () => ({
+          ...screenshotRef,
+          kind: "event_log" as const,
+          relativePath: "events.jsonl",
+          mimeType: "application/x-ndjson" as const,
+        }),
+        writeScreenshot: async () => screenshotRef,
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "00000" },
+      runId: "replay-outcome-evidence-order",
+    });
+
+    assert.equal(result.status, "business_outcome");
+    if (result.status === "business_outcome") {
+      assert.deepEqual(result.evidence, [screenshotRef]);
+      assert.equal(control.snapshot(result.meta.sessionId).phase, "COMPLETED");
+    }
+  });
+
+  it("captures failure evidence before failing its automation lease", async () => {
+    const control = new ControlCoordinator();
+    const surface = new ControlCheckingEvidenceSurface(control, true);
+    const events: Array<Readonly<Record<string, unknown>>> = [];
+    const screenshotRef = {
+      id: "ev_cccccccccccccccccccccccc",
+      kind: "screenshot" as const,
+      relativePath: "screenshots/failure.png",
+      sha256: "c".repeat(64),
+      byteLength: 8,
+      mimeType: "image/png" as const,
+      createdAt: "2026-08-27T18:00:00.000Z",
+    };
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      screenshotRedactionVerified: true,
+      evidence: {
+        appendEvent: async (event) => {
+          if (event.type === "replay.completed") {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          events.push({ ...event });
+          return {
+            eventId: `event-failure-${events.length}`,
+            relativePath: "events.jsonl",
+            byteOffset: events.length - 1,
+            byteLength: 1,
+            lineSha256: "d".repeat(64),
+          };
+        },
+        eventLogRef: async () => ({
+          ...screenshotRef,
+          kind: "event_log" as const,
+          relativePath: "events.jsonl",
+          mimeType: "application/x-ndjson" as const,
+        }),
+        writeScreenshot: async () => screenshotRef,
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-failure-evidence-order",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.deepEqual(result.error.evidence, [screenshotRef]);
+      assert.equal(control.snapshot(result.meta.sessionId).phase, "FAILED");
+      assert.equal(events.at(-2)?.type, "replay.failed");
+      assert.equal(events.at(-1)?.type, "replay.completed");
+      assert.equal(events.at(-1)?.timestamp, result.meta.finishedAt);
+    }
+  });
+
   it("rejects invalid typed input before creating or navigating any surface", async () => {
     const surface = new FakeReplaySurface();
     const result = await engine(surface).run({
@@ -210,6 +416,172 @@ describe("deterministic capability replay", () => {
     assert.equal(surface.navigateCalls, 0);
     assert.equal(surface.observeCalls, 0);
     assert.equal(RunResultSchema.safeParse(result).success, true);
+  });
+
+  it("defaults an omitted artifact approval mode to strict before surface creation", async () => {
+    const surface = new FakeReplaySurface();
+    const result = await new ReplayEngine({
+      surface,
+      control: new ControlCoordinator(),
+      platformPolicy,
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-default-strict-approval-denied",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.phase, "preflight");
+      assert.equal(result.error.code, "ARTIFACT_INVALID");
+      assert.match(result.error.message, /requires a current approval/u);
+    }
+    assert.equal(surface.createCalls, 0);
+    assert.equal(surface.navigateCalls, 0);
+    assert.equal(surface.observeCalls, 0);
+  });
+
+  it("keeps the replayCapability convenience entrypoint strict when mode is omitted", async () => {
+    const surface = new FakeReplaySurface();
+    const result = await replayCapability(
+      {
+        surface,
+        control: new ControlCoordinator(),
+        platformPolicy,
+        now: () => new Date("2026-08-27T18:00:00.000Z"),
+        sleep: async () => undefined,
+      },
+      {
+        artifact: replayArtifact(),
+        binding: replayBinding(),
+        inputs: { memberId: "84721" },
+        runId: "replay-capability-default-strict-denied",
+      },
+    );
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.phase, "preflight");
+      assert.equal(result.error.code, "ARTIFACT_INVALID");
+    }
+    assert.equal(surface.createCalls, 0);
+  });
+
+  it("strict mode requires an exact, current artifact approval before surface creation", async () => {
+    const artifact = replayArtifact();
+    const invalidApprovals: readonly (ArtifactApproval | undefined)[] = [
+      undefined,
+      { ...artifactApproval(artifact), artifactId: "another-artifact" },
+      { ...artifactApproval(artifact), revision: artifact.revision + 1 },
+      { ...artifactApproval(artifact), digest: "b".repeat(64) },
+      {
+        ...artifactApproval(artifact),
+        approvedAt: "2026-08-27T20:00:00.000Z",
+        expiresAt: "2026-08-27T21:00:00.000Z",
+      },
+      { ...artifactApproval(artifact), expiresAt: "2026-08-27T17:30:00.000Z" },
+    ];
+
+    for (const approval of invalidApprovals) {
+      const surface = new FakeReplaySurface();
+      const result = await strictEngine(surface).run({
+        artifact,
+        ...(approval ? { artifactApproval: approval } : {}),
+        binding: replayBinding(),
+        inputs: { memberId: "84721" },
+        runId: "replay-strict-approval-denied",
+      });
+      assert.equal(result.status, "failed");
+      if (result.status === "failed") {
+        assert.equal(result.error.phase, "preflight");
+        assert.equal(result.error.code, "ARTIFACT_INVALID");
+      }
+      assert.equal(surface.createCalls, 0);
+      assert.equal(surface.navigateCalls, 0);
+    }
+  });
+
+  it("accepts a valid strict approval and preserves explicit non-strict replay", async () => {
+    const artifact = replayArtifact();
+    const strictSurface = new FakeReplaySurface();
+    const strictResult = await strictEngine(strictSurface).run({
+      artifact,
+      artifactApproval: artifactApproval(artifact),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-strict-approval-accepted",
+    });
+    assert.equal(strictResult.status, "succeeded");
+    assert.equal(strictSurface.createCalls, 1);
+
+    const nonStrictSurface = new FakeReplaySurface();
+    const nonStrictResult = await new ReplayEngine({
+      surface: nonStrictSurface,
+      control: new ControlCoordinator(),
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+    }).run({
+      artifact,
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-non-strict-explicit",
+    });
+    assert.equal(nonStrictResult.status, "succeeded");
+    assert.equal(nonStrictSurface.createCalls, 1);
+  });
+
+  it("binds strict replay evidence to the exact artifact approval digest", async () => {
+    const artifact = replayArtifact();
+    const approval = artifactApproval(artifact);
+    const events: Array<Readonly<Record<string, unknown>>> = [];
+    const evidenceRef = {
+      id: "ev_aaaaaaaaaaaaaaaaaaaaaaaa",
+      kind: "event_log" as const,
+      relativePath: "events.jsonl",
+      sha256: "a".repeat(64),
+      byteLength: 1,
+      mimeType: "application/x-ndjson",
+      createdAt: "2026-08-27T18:00:00.000Z",
+    };
+    const result = await new ReplayEngine({
+      surface: new FakeReplaySurface(),
+      control: new ControlCoordinator(),
+      platformPolicy,
+      artifactApprovalMode: "strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      evidence: {
+        appendEvent: async (event) => {
+          events.push({ ...event });
+          return {
+            eventId: `event-${events.length}`,
+            relativePath: "events.jsonl",
+            byteOffset: events.length - 1,
+            byteLength: 1,
+            lineSha256: "b".repeat(64),
+          };
+        },
+        eventLogRef: async () => evidenceRef,
+        writeScreenshot: async () => ({ ...evidenceRef, kind: "screenshot" as const }),
+      },
+    }).run({
+      artifact,
+      artifactApproval: approval,
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-strict-evidence-binding",
+    });
+
+    assert.equal(result.status, "succeeded");
+    const started = events.find((event) => event.type === "replay.started");
+    assert.ok(started);
+    assert.equal(started.artifactApprovalMode, "strict");
+    assert.equal(started.artifactApprovalDigest, computeArtifactApprovalDigest(approval));
   });
 
   it("rejects reviewed-content drift before creating a surface", async () => {
@@ -253,6 +625,194 @@ describe("deterministic capability replay", () => {
     assert.equal(result.meta.modelCalls, 0);
   });
 
+  it("rejects unreviewed or digest-drifted target overrides before creating a surface", async () => {
+    const artifact = replayArtifact();
+    const baseTarget = artifact.targets.lookupButton;
+    assert.ok(baseTarget);
+    const overrideTarget = structuredClone(baseTarget);
+    overrideTarget.robustnessRationale =
+      "Tenant review confirmed equivalent semantic locators for this exact legacy surface.";
+    const unreviewedBinding = {
+      ...replayBinding(),
+      targetOverrides: { lookupButton: overrideTarget },
+    };
+    const unreviewedSurface = new FakeReplaySurface();
+    const unreviewedResult = await engine(unreviewedSurface).run({
+      artifact,
+      binding: unreviewedBinding,
+      inputs: { memberId: "84721" },
+      runId: "replay-unreviewed-target-override",
+    });
+    assert.equal(unreviewedResult.status, "failed");
+    if (unreviewedResult.status === "failed") {
+      assert.equal(unreviewedResult.error.phase, "preflight");
+      assert.equal(unreviewedResult.error.code, "ARTIFACT_INVALID");
+    }
+    assert.equal(unreviewedSurface.createCalls, 0);
+
+    const reviewedBinding = {
+      ...unreviewedBinding,
+      targetOverrideReviews: {
+        lookupButton: {
+          baseTargetDigest: computeTargetDigest(baseTarget),
+          overrideTargetDigest: computeTargetDigest(overrideTarget),
+          reviewedBy: "reviewer-01",
+          reviewedAt: "2026-08-27T17:00:00.000Z",
+          expiresAt: "2026-08-27T19:00:00.000Z",
+        },
+      },
+    };
+    const tamperedBinding = structuredClone(reviewedBinding);
+    tamperedBinding.targetOverrides.lookupButton.description =
+      "A semantic target changed after its review";
+    const tamperedSurface = new FakeReplaySurface();
+    const tamperedResult = await engine(tamperedSurface).run({
+      artifact,
+      binding: tamperedBinding,
+      inputs: { memberId: "84721" },
+      runId: "replay-tampered-target-override",
+    });
+    assert.equal(tamperedResult.status, "failed");
+    if (tamperedResult.status === "failed") {
+      assert.equal(tamperedResult.error.phase, "preflight");
+      assert.equal(tamperedResult.error.code, "ARTIFACT_INVALID");
+    }
+    assert.equal(tamperedSurface.createCalls, 0);
+  });
+
+  it("accepts an exact digest-reviewed semantic target override", async () => {
+    const artifact = replayArtifact();
+    const baseTarget = artifact.targets.lookupButton;
+    assert.ok(baseTarget);
+    const overrideTarget = structuredClone(baseTarget);
+    overrideTarget.robustnessRationale =
+      "Tenant review confirmed equivalent semantic locators for this exact legacy surface.";
+    const surface = new FakeReplaySurface();
+    const result = await engine(surface).run({
+      artifact,
+      binding: {
+        ...replayBinding(),
+        targetOverrides: { lookupButton: overrideTarget },
+        targetOverrideReviews: {
+          lookupButton: {
+            baseTargetDigest: computeTargetDigest(baseTarget),
+            overrideTargetDigest: computeTargetDigest(overrideTarget),
+            reviewedBy: "reviewer-01",
+            reviewedAt: "2026-08-27T17:00:00.000Z",
+            expiresAt: "2026-08-27T19:00:00.000Z",
+          },
+        },
+      },
+      inputs: { memberId: "84721" },
+      runId: "replay-reviewed-target-override",
+    });
+    assert.equal(result.status, "succeeded");
+    assert.equal(surface.createCalls, 1);
+  });
+
+  it("executes one commit with an approval bound to its exact replay step", async () => {
+    const surface = new FakeReplaySurface();
+    const artifact = commitArtifact();
+    const runId = "replay-step-bound-commit-approval";
+    const result = await new ReplayEngine({
+      surface,
+      control: new ControlCoordinator(),
+      artifactApprovalMode: "non_strict",
+      platformPolicy: {
+        ...platformPolicy,
+        allowedEffects: ["read", "reversible_write", "commit"],
+      },
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+    }).run({
+      artifact,
+      binding: commitBinding(),
+      inputs: { memberId: "84721" },
+      approval: commitApproval(artifact, runId),
+      runId,
+    });
+    assert.equal(result.status, "succeeded");
+    assert.equal(surface.activationCalls, 1);
+  });
+
+  it("denies a replay action after drift to a secondary binding-allowed origin", async () => {
+    const secondaryOrigin = "http://127.0.0.1:4314";
+    const surface = new FakeReplaySurface();
+    surface.observationOrigin = secondaryOrigin;
+    const bindingWithSecondaryOrigin: AppBinding = {
+      ...replayBinding(),
+      policy: {
+        ...replayBinding().policy,
+        allowedOrigins: ["http://127.0.0.1:4312", secondaryOrigin],
+      },
+    };
+    const result = await new ReplayEngine({
+      surface,
+      control: new ControlCoordinator(),
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+    }).run({
+      artifact: replayArtifact(),
+      binding: bindingWithSecondaryOrigin,
+      inputs: { memberId: "84721" },
+      runId: "replay-secondary-origin-denied",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "POLICY_DENIED");
+    assert.deepEqual(surface.dispatchCommands, []);
+  });
+
+  it("consumes a step-bound approval before a commit can be attempted again", async () => {
+    const surface = new FakeReplaySurface();
+    const control = new ControlCoordinator();
+    const artifact = commitArtifact(true);
+    const runId = "replay-single-use-commit-approval";
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      artifactApprovalMode: "non_strict",
+      platformPolicy: {
+        ...platformPolicy,
+        allowedEffects: ["read", "reversible_write", "commit"],
+      },
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      onIntervention: async (context) => {
+        control.requestPause(context.automationGrant, "Review failed commit checkpoint");
+        await control.quiesceAutomation(context.automationGrant);
+        const operatorGrant = control.claimOperator(context.session.id, "operator-approval-review");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        return {
+          sessionId: context.session.id,
+          automationGrant,
+          observation: await surface.observe(context.session.id),
+          checkpoint: {
+            passed: true,
+            observed: "Operator confirmed the same session is ready for guarded recovery.",
+          },
+        };
+      },
+    }).run({
+      artifact,
+      binding: commitBinding(),
+      inputs: { memberId: "84721" },
+      approval: commitApproval(artifact, runId),
+      runId,
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.code, "POLICY_DENIED");
+      assert.equal(result.error.observed, "APPROVAL_INVALID");
+    }
+    assert.equal(surface.activationCalls, 1);
+    assert.deepEqual(surface.dispatchCommands, ["set_value", "activate"]);
+  });
+
   it("retries only a configured recoverable class and stays within maxAttempts", async () => {
     const surface = new FakeReplaySurface("once");
     const result = await engine(surface).run({
@@ -289,6 +849,93 @@ describe("deterministic capability replay", () => {
     assert.equal(RunResultSchema.safeParse(result).success, true);
   });
 
+  it("excludes explicit operator handoff time from the active automation timeout", async () => {
+    const surface = new FakeReplaySurface("always");
+    const control = new ControlCoordinator();
+    let monotonicTimeMs = 0;
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      monotonicNow: () => monotonicTimeMs,
+      sleep: async () => undefined,
+      runTimeoutMs: 100,
+      onIntervention: async (context) => {
+        control.requestPause(context.automationGrant, "Operator recovery requested");
+        await control.quiesceAutomation(context.automationGrant);
+        const operatorGrant = control.claimOperator(context.session.id, "operator-replay-test");
+        monotonicTimeMs += 10_000;
+        Reflect.set(surface, "buttonFault", "none");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        return {
+          sessionId: context.session.id,
+          automationGrant,
+          observation: await surface.observe(context.session.id),
+          checkpoint: { passed: true, observed: "Operator restored the synthetic surface." },
+        };
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-operator-time-excluded",
+    });
+
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(surface.dispatchCommands, ["set_value", "activate"]);
+  });
+
+  it("still enforces active automation time immediately after an operator handoff", async () => {
+    const surface = new FakeReplaySurface("always");
+    const control = new ControlCoordinator();
+    let handoffReturned = false;
+    let postHandoffClockReads = 0;
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      monotonicNow: () => {
+        if (!handoffReturned) return 0;
+        postHandoffClockReads += 1;
+        return postHandoffClockReads === 1 ? 10_000 : 10_101;
+      },
+      sleep: async () => undefined,
+      runTimeoutMs: 100,
+      onIntervention: async (context) => {
+        control.requestPause(context.automationGrant, "Operator recovery requested");
+        await control.quiesceAutomation(context.automationGrant);
+        const operatorGrant = control.claimOperator(context.session.id, "operator-replay-test");
+        Reflect.set(surface, "buttonFault", "none");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        handoffReturned = true;
+        return {
+          sessionId: context.session.id,
+          automationGrant,
+          observation: await surface.observe(context.session.id),
+          checkpoint: { passed: true, observed: "Operator restored the synthetic surface." },
+        };
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-active-time-enforced",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.error.code, "RUN_TIMEOUT");
+      assert.equal(result.error.observed, "active automation duration 101ms");
+    }
+    assert.deepEqual(surface.dispatchCommands, ["set_value"]);
+  });
+
   it("fails and revokes the current automation grant when resume validation fails", async () => {
     const surface = new FakeReplaySurface("always");
     const control = new ControlCoordinator();
@@ -297,6 +944,7 @@ describe("deterministic capability replay", () => {
       surface,
       control,
       platformPolicy,
+      artifactApprovalMode: "non_strict",
       now: () => new Date("2026-08-27T18:00:00.000Z"),
       sleep: async () => undefined,
       onIntervention: async (context) => {
@@ -341,6 +989,42 @@ describe("deterministic capability replay", () => {
     assert.equal(result.meta.modelCalls, 0);
   });
 
+  it("revokes a valid returned lease when intervention metadata names a replacement session", async () => {
+    const surface = new FakeReplaySurface("always");
+    const control = new ControlCoordinator();
+    const result = await new ReplayEngine({
+      surface,
+      control,
+      platformPolicy,
+      artifactApprovalMode: "non_strict",
+      now: () => new Date("2026-08-27T18:00:00.000Z"),
+      sleep: async () => undefined,
+      onIntervention: async (context) => {
+        control.requestPause(context.automationGrant, "Operator recovery requested");
+        await control.quiesceAutomation(context.automationGrant);
+        const operatorGrant = control.claimOperator(context.session.id, "operator-replay-test");
+        control.requestResume(operatorGrant);
+        const automationGrant = control.returnToAutomation(operatorGrant, context.runId);
+        return {
+          sessionId: "replacement-session",
+          automationGrant,
+          observation: await surface.observe(context.session.id),
+          checkpoint: { passed: true, observed: "Synthetic recovery passed." },
+        };
+      },
+    }).run({
+      artifact: replayArtifact(),
+      binding: replayBinding(),
+      inputs: { memberId: "84721" },
+      runId: "replay-wrong-session-return",
+    });
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.code, "CONTROL_LOST");
+    assert.equal(control.snapshot(result.meta.sessionId).phase, "FAILED");
+    assert.equal(control.snapshot(result.meta.sessionId).owner, null);
+  });
+
   it("cancels and settles a timed-out action before terminal control, close, or return", async () => {
     const control = new ControlCoordinator();
     const surface = new AbortAwareDelayedSurface(control);
@@ -350,6 +1034,7 @@ describe("deterministic capability replay", () => {
       surface,
       control,
       platformPolicy,
+      artifactApprovalMode: "non_strict",
       now: () => new Date("2026-08-27T18:00:00.000Z"),
     }).run({
       artifact,
@@ -380,6 +1065,7 @@ describe("deterministic capability replay", () => {
       surface,
       control,
       platformPolicy,
+      artifactApprovalMode: "non_strict",
       now: () => new Date("2026-08-27T18:00:00.000Z"),
     })
       .run({
@@ -551,7 +1237,7 @@ describe("deterministic capability replay", () => {
         },
         effects: ["read", "reversible_write"],
         policyRequirements: {
-          allowedRoutes: ["/legacy"],
+          allowedRoutes: ["/legacy", "/legacy/**"],
           allowedCommands: ["navigate", "set_value", "activate", "extract"],
           allowedEffects: ["read", "reversible_write"],
           approvalRequiredFor: [],
@@ -626,6 +1312,7 @@ describe("deterministic capability replay", () => {
         surface,
         control,
         platformPolicy: createDemoPolicyStack(binding).platform,
+        artifactApprovalMode: "non_strict",
       }).run({
         artifact,
         binding,

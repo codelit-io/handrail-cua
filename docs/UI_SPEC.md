@@ -6,7 +6,7 @@ Concept: docs/design/operator-console-concept.png, generated specifically for th
 
 ## Purpose and target flow
 
-The console gives one operator exclusive control of the exact browser session paused by automation. The primary flow is: intervention opens -> operator sees the reason and live state -> operator claims control -> operator acts on the live screenshot or focused control -> operator captures evidence -> operator returns control -> automation re-observes and resumes.
+The capability-gated console gives one operator exclusive control of the exact browser session paused by automation. The primary flow is: an assigned operator opens the bearer-capability link -> the browser exchanges the fragment value for a scoped cookie -> the operator sees the reason and live state -> the operator claims control -> the operator acts on the live screenshot or focused control -> the operator captures evidence -> the operator returns control -> automation re-observes and resumes.
 
 The synthetic legacy banking UI inside the viewport is intentionally not modernized. Its hostile frames, table layout, sparse semantics, and old visual language are part of the test surface.
 
@@ -92,7 +92,7 @@ Icons are small inline SVGs with 1.75 to 2px rounded strokes: person for human o
 
 - The live image preserves aspect ratio and maps pointer coordinates back to the current Playwright viewport. Clicks are accepted only while the operator owns the current lease epoch.
 - Send types the field value into the currently focused element, clears the console input after an acknowledged action, and never logs the raw value.
-- Capture evidence saves a policy-redacted screenshot and appends an audited timeline event.
+- Capture evidence saves a pixel-safety-asserted screenshot and appends an audited timeline event. In evaluator runs, configured capture and audit sinks persist the image plus authorization/completion events; sink failure stops the lease and blocks resume.
 - Return to automation prompts no second confirmation for the synthetic demo, but it does not skip the current automation step. Resume forces a fresh observation and postcondition check.
 - Stale ownership, disconnected session, and expired lease are visible error states; controls disable instead of acting optimistically.
 

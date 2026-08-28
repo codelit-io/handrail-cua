@@ -71,6 +71,7 @@ function copySnapshot(record: LeaseRecord): ControlSnapshot {
 export class ControlCoordinator {
   readonly #leases = new Map<string, LeaseRecord>();
   readonly #queues = new Map<string, Promise<void>>();
+  readonly #inFlight = new Map<string, { readonly epoch: number; readonly tokenHash: string }>();
 
   createAutomationLease(
     sessionId: string,
@@ -96,30 +97,14 @@ export class ControlCoordinator {
 
   snapshot(sessionId: string): ControlSnapshot {
     const record = this.#requireRecord(sessionId);
-    this.#expireIfNeeded(record);
+    this.#expireIfNeeded(record, true);
     return copySnapshot(record);
   }
 
   assertGrant(grant: ControlGrant, expectedKind?: ControlOwnerKind): void {
     const record = this.#requireRecord(grant.sessionId);
     this.#expireIfNeeded(record);
-
-    if (
-      record.epoch !== grant.epoch ||
-      !record.owner ||
-      record.owner.kind !== grant.actor.kind ||
-      record.owner.id !== grant.actor.id ||
-      !record.tokenHash ||
-      !tokenMatches(grant.leaseToken, record.tokenHash)
-    ) {
-      throw new ControlError(
-        "CONTROL_LOST",
-        "The control grant is stale or does not own the session.",
-      );
-    }
-    if (expectedKind && record.owner.kind !== expectedKind) {
-      throw new ControlError("CONTROL_LOST", `${expectedKind} does not own the session.`);
-    }
+    this.#assertGrantIdentity(record, grant, expectedKind);
   }
 
   requestPause(grant: ControlGrant, reason: string): ControlSnapshot {
@@ -221,6 +206,30 @@ export class ControlCoordinator {
     });
   }
 
+  async failQuiesced(
+    sessionId: string,
+    expectedEpoch: number,
+    reason: string,
+  ): Promise<ControlSnapshot> {
+    return this.#enqueue(sessionId, async () => {
+      const record = this.#requireRecord(sessionId);
+      this.#expectPhase(record, "AWAITING_OPERATOR");
+      if (record.owner !== null || record.epoch !== expectedEpoch) {
+        throw new ControlError(
+          "CONTROL_LOST",
+          "The quiesced control epoch changed before terminal failure.",
+        );
+      }
+      record.phase = "FAILED";
+      record.owner = null;
+      record.tokenHash = null;
+      record.expiresAt = null;
+      record.reason = reason;
+      record.epoch += 1;
+      return copySnapshot(record);
+    });
+  }
+
   async withControl<T>(grant: ControlGrant, action: () => Promise<T>): Promise<T> {
     return this.#enqueue(grant.sessionId, async () => {
       this.assertGrant(grant);
@@ -233,11 +242,26 @@ export class ControlCoordinator {
           `${grant.actor.kind} cannot start an action while control is ${record.phase}.`,
         );
       }
-      const result = await action();
-      // A pause request may arrive while an already-authorized action is in flight. The
-      // grant remains valid until this boundary returns; quiescence is queued behind it.
-      this.assertGrant(grant);
-      return result;
+      const inFlight = { epoch: grant.epoch, tokenHash: hashToken(grant.leaseToken) };
+      this.#inFlight.set(grant.sessionId, inFlight);
+      try {
+        const result = await action();
+        // A pause request may arrive while an already-authorized action is in flight. The
+        // grant remains valid until this boundary returns; quiescence is queued behind it.
+        // Validate revocation and identity without retroactively rejecting a successful
+        // mutation solely because its lease TTL elapsed while the action was in flight.
+        const settledRecord = this.#requireRecord(grant.sessionId);
+        this.#assertGrantIdentity(settledRecord, grant);
+        return result;
+      } finally {
+        if (this.#inFlight.get(grant.sessionId) === inFlight) {
+          const settledRecord = this.#leases.get(grant.sessionId);
+          if (settledRecord && this.#grantIdentityMatches(settledRecord, grant)) {
+            this.#expireSettledOperatorLease(settledRecord);
+          }
+          this.#inFlight.delete(grant.sessionId);
+        }
+      }
     });
   }
 
@@ -286,8 +310,60 @@ export class ControlCoordinator {
     }
   }
 
-  #expireIfNeeded(record: LeaseRecord): void {
+  #assertGrantIdentity(
+    record: LeaseRecord,
+    grant: ControlGrant,
+    expectedKind?: ControlOwnerKind,
+  ): void {
+    if (!this.#grantIdentityMatches(record, grant)) {
+      throw new ControlError(
+        "CONTROL_LOST",
+        "The control grant is stale or does not own the session.",
+      );
+    }
+    if (expectedKind && record.owner?.kind !== expectedKind) {
+      throw new ControlError("CONTROL_LOST", `${expectedKind} does not own the session.`);
+    }
+  }
+
+  #grantIdentityMatches(record: LeaseRecord, grant: ControlGrant): boolean {
+    const owner = record.owner;
+    return (
+      record.epoch === grant.epoch &&
+      owner !== null &&
+      owner.kind === grant.actor.kind &&
+      owner.id === grant.actor.id &&
+      record.tokenHash !== null &&
+      tokenMatches(grant.leaseToken, record.tokenHash)
+    );
+  }
+
+  #expireSettledOperatorLease(record: LeaseRecord): void {
+    if (
+      record.owner?.kind !== "operator" ||
+      !record.expiresAt ||
+      Date.parse(record.expiresAt) > Date.now()
+    ) {
+      return;
+    }
+    record.owner = null;
+    record.tokenHash = null;
+    record.expiresAt = null;
+    record.epoch += 1;
+    record.phase = "AWAITING_OPERATOR";
+  }
+
+  #expireIfNeeded(record: LeaseRecord, deferInFlightExpiry = false): void {
     if (!record.expiresAt || Date.parse(record.expiresAt) > Date.now()) return;
+    const inFlight = this.#inFlight.get(record.sessionId);
+    if (
+      inFlight?.epoch === record.epoch &&
+      record.tokenHash !== null &&
+      inFlight.tokenHash === record.tokenHash
+    ) {
+      if (deferInFlightExpiry) return;
+      throw new ControlError("LEASE_EXPIRED", "The control lease expired during an action.");
+    }
     const expiredOperator = record.owner?.kind === "operator";
     record.owner = null;
     record.tokenHash = null;

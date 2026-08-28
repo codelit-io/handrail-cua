@@ -24,11 +24,16 @@ import type {
   SurfaceSession,
 } from "../surface/types.js";
 import {
+  ArtifactApprovalError,
   ArtifactBindingError,
   ArtifactCompilationError,
+  assertArtifactApproval,
   assertValidArtifact,
   bindArtifactInputs,
+  bindReviewedTargetOverrides,
   bindValueExpression,
+  computeArtifactApprovalDigest,
+  TargetOverrideReviewError,
   validateArtifactOutputs,
 } from "./artifact.js";
 import { type ControlCoordinator, ControlError, type ControlGrant } from "./control.js";
@@ -42,11 +47,13 @@ import {
   type PolicyLayer,
   type PolicyStack,
   routeMatches,
+  surfaceAccessPolicy,
 } from "./policy.js";
 
 const ZERO_MODEL_CALLS = 0 as const;
 const DEFAULT_RUN_TIMEOUT_MS = 2 * 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
+const ENTRYPOINT_OPERATION_ID = "replay-entrypoint";
 
 export type ReplayRecoverableKind =
   | "target_not_found"
@@ -66,6 +73,8 @@ export class RecoverableReplayError extends Error {
 
 export interface ReplayInvocation {
   readonly artifact: unknown;
+  /** Trusted catalog record. Strict engines require and validate it before surface creation. */
+  readonly artifactApproval?: unknown;
   readonly binding: unknown;
   readonly inputs: Readonly<Record<string, unknown>>;
   /** Optional exact-origin URL for tenant/scenario query parameters; its route must match entrypoint. */
@@ -128,10 +137,15 @@ export interface ReplayEngineOptions {
   readonly screenshotRedactionVerified?: boolean;
   readonly resolveSecret?: (name: string) => ScalarValue;
   readonly now?: () => Date;
+  /** Monotonic clock used only for the active automation timeout budget. */
+  readonly monotonicNow?: () => number;
   readonly sleep?: (durationMs: number) => Promise<void>;
+  /** Excludes time spent inside an explicit operator handoff. */
   readonly runTimeoutMs?: number;
   readonly closeSessionOnFinish?: boolean;
   readonly surfaceSentinels?: readonly ReplaySurfaceSentinel[];
+  /** `strict` requires a valid artifact approval and is the fail-closed default. */
+  readonly artifactApprovalMode?: "strict" | "non_strict";
   /**
    * Optional same-session handoff bridge. It may pause/claim/return control once per run.
    * Without this callback replay preserves the default typed needs_intervention result.
@@ -146,6 +160,7 @@ interface PreflightSuccess {
   readonly artifact: CapabilityArtifact;
   readonly binding: ReturnType<typeof AppBindingSchema.parse>;
   readonly inputs: Readonly<Record<string, ScalarValue>>;
+  readonly targets: Record<string, TargetSpec>;
   readonly policy: PolicyStack;
   readonly entryUrl: string;
 }
@@ -170,6 +185,7 @@ interface ExecutionState {
   readonly bindingOrigin: string;
   readonly session: SurfaceSession;
   readonly approval?: BoundApproval;
+  readonly consumedBoundApprovalIds: Set<string>;
   readonly resolveSecret?: (name: string) => ScalarValue;
   sessionId: string;
   grant: ControlGrant;
@@ -177,6 +193,8 @@ interface ExecutionState {
   latestObservation: SurfaceObservation;
   actionSequence: number;
   handledInterventions: number;
+  readonly automationBudgetStartedAtMs: number;
+  operatorHandoffDurationMs: number;
   currentStepId?: string;
 }
 
@@ -217,6 +235,40 @@ function validDate(clock: () => Date): Date {
 
 function safeIdentifier(value: string | undefined, fallback: string): string {
   return value && /^[A-Za-z][A-Za-z0-9._-]{1,127}$/u.test(value) ? value : fallback;
+}
+
+function snapshotBoundApproval(approval: BoundApproval): BoundApproval {
+  return Object.freeze({
+    id: approval.id,
+    runId: approval.runId,
+    operationId: approval.operationId,
+    ...(approval.command !== undefined ? { command: approval.command } : {}),
+    ...(approval.action !== undefined ? { action: approval.action } : {}),
+    effect: approval.effect,
+    origin: approval.origin,
+    route: approval.route,
+    expiresAt:
+      approval.expiresAt instanceof Date ? approval.expiresAt.getTime() : approval.expiresAt,
+    ...(approval.capabilityDigest !== undefined
+      ? { capabilityDigest: approval.capabilityDigest }
+      : {}),
+  });
+}
+
+function consumeBoundApproval(
+  authorization: "policy" | "bound_approval" | "human_control",
+  approval: BoundApproval | undefined,
+  consumedApprovalIds: Set<string>,
+): void {
+  if (authorization !== "bound_approval") return;
+  if (!approval || consumedApprovalIds.has(approval.id)) {
+    throw new PolicyDeniedError({
+      allowed: false,
+      code: "APPROVAL_INVALID",
+      summary: "The bound approval has already authorized one operation in this replay.",
+    });
+  }
+  consumedApprovalIds.add(approval.id);
 }
 
 function elapsedMs(startedAt: Date, finishedAt: Date): number {
@@ -449,6 +501,8 @@ function predicateContext(state: ExecutionState): PredicateContext {
     outputs: state.outputs,
     inputs: { ...state.inputs },
     targets: state.targets,
+    grant: state.grant,
+    expectedUrl: state.currentUrl,
   };
 }
 
@@ -563,10 +617,12 @@ export class ReplayEngine {
   readonly #screenshotRedactionVerified: boolean;
   readonly #resolveSecret?: ReplayEngineOptions["resolveSecret"];
   readonly #now: () => Date;
+  readonly #monotonicNow: () => number;
   readonly #sleep: (durationMs: number) => Promise<void>;
   readonly #runTimeoutMs: number;
   readonly #closeSessionOnFinish: boolean;
   readonly #surfaceSentinels: readonly ReplaySurfaceSentinel[];
+  readonly #artifactApprovalMode: "strict" | "non_strict";
   readonly #onIntervention?: ReplayEngineOptions["onIntervention"];
 
   constructor(options: ReplayEngineOptions) {
@@ -580,12 +636,21 @@ export class ReplayEngine {
     this.#screenshotRedactionVerified = options.screenshotRedactionVerified ?? false;
     this.#resolveSecret = options.resolveSecret;
     this.#now = options.now ?? (() => new Date());
+    this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#sleep =
       options.sleep ??
       ((durationMs) => new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
     this.#runTimeoutMs = options.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
     this.#closeSessionOnFinish = options.closeSessionOnFinish ?? true;
     this.#surfaceSentinels = options.surfaceSentinels ?? [];
+    if (
+      options.artifactApprovalMode !== undefined &&
+      options.artifactApprovalMode !== "strict" &&
+      options.artifactApprovalMode !== "non_strict"
+    ) {
+      throw new TypeError("artifactApprovalMode must be strict or non_strict.");
+    }
+    this.#artifactApprovalMode = options.artifactApprovalMode ?? "strict";
     this.#onIntervention = options.onIntervention;
     if (this.#runTimeoutMs < 100 || this.#runTimeoutMs > 30 * 60_000) {
       throw new RangeError("runTimeoutMs must be between 100ms and 30 minutes.");
@@ -595,7 +660,10 @@ export class ReplayEngine {
   async run(invocation: ReplayInvocation): Promise<RunResult> {
     const startedAt = validDate(this.#now);
     const runId = safeIdentifier(invocation.runId, `replay-${randomUUID()}`);
-    const preflight = this.#preflight(invocation);
+    const boundApproval = invocation.approval
+      ? snapshotBoundApproval(invocation.approval)
+      : undefined;
+    const preflight = this.#preflight(invocation, startedAt);
     if (!preflight.ok) {
       return {
         status: "failed",
@@ -611,24 +679,35 @@ export class ReplayEngine {
       };
     }
 
-    const { artifact, binding, inputs, policy, entryUrl } = preflight;
+    const { artifact, binding, inputs, targets, policy, entryUrl } = preflight;
+    const artifactApprovalDigest =
+      invocation.artifactApproval === undefined
+        ? undefined
+        : computeArtifactApprovalDigest(invocation.artifactApproval);
+    const consumedBoundApprovalIds = new Set<string>();
     let sessionId = "session-pending";
     let grant: ControlGrant | undefined;
     let state: ExecutionState | undefined;
     try {
       // Policy is checked before session creation, so a denied entrypoint never touches a surface.
-      enforcePolicy(policy, {
+      const entryAuthorization = enforcePolicy(policy, {
         url: entryUrl,
         command: "navigate",
         effect: "read",
         actor: "replay",
         runId,
+        operationId: ENTRYPOINT_OPERATION_ID,
         capabilityDigest: artifact.digest,
-        ...(invocation.approval ? { approval: invocation.approval } : {}),
+        ...(boundApproval ? { approval: boundApproval } : {}),
         now: validDate(this.#now),
       });
+      consumeBoundApproval(
+        entryAuthorization.authorization,
+        boundApproval,
+        consumedBoundApprovalIds,
+      );
 
-      const session = await this.#surface.createSession(binding);
+      const session = await this.#surface.createSession(binding, surfaceAccessPolicy(policy));
       sessionId = session.id;
       grant = this.#control.createAutomationLease(sessionId, runId);
       await this.#event({
@@ -636,48 +715,46 @@ export class ReplayEngine {
         type: "replay.started",
         artifactId: artifact.id,
         artifactDigest: artifact.digest,
+        artifactApprovalMode: this.#artifactApprovalMode,
+        ...(artifactApprovalDigest ? { artifactApprovalDigest } : {}),
         sessionId,
         modelCalls: ZERO_MODEL_CALLS,
       });
       await this.#surface.navigate(sessionId, entryUrl, grant);
       const observation = await this.#surface.observe(sessionId);
-      const effectiveTargets = { ...artifact.targets, ...binding.targetOverrides };
+      const automationBudgetStartedAtMs = this.#monotonicNow();
       state = {
         runId,
         artifact,
         inputs,
-        targets: effectiveTargets,
+        targets,
         outputs: {},
         stepOutputs: {},
         policy,
         bindingOrigin: binding.origin,
         session,
-        ...(invocation.approval ? { approval: invocation.approval } : {}),
+        ...(boundApproval ? { approval: boundApproval } : {}),
+        consumedBoundApprovalIds,
         ...(this.#resolveSecret ? { resolveSecret: this.#resolveSecret } : {}),
         sessionId,
         grant,
-        currentUrl: pathUrl(binding.origin, observation.route),
+        currentUrl: observation.url,
         latestObservation: observation,
         actionSequence: 0,
         handledInterventions: 0,
+        automationBudgetStartedAtMs,
+        operatorHandoffDurationMs: 0,
       };
 
       this.#assertSurfaceCompatible(artifact, binding.expectedFingerprint, observation);
 
-      const deadline = Date.now() + this.#runTimeoutMs;
       for (const step of artifact.steps) {
-        if (Date.now() > deadline) {
-          throw new ReplayStepError({
-            code: "RUN_TIMEOUT",
-            message: "Replay exceeded its configured run deadline.",
-            retryable: false,
-          });
-        }
+        this.#assertWithinRunBudget(state);
         state.currentStepId = step.id;
         const outcome = await this.#executeStepWithHandoff(step, state);
         if (outcome) {
-          const snapshot = await this.#control.complete(state.grant);
           const evidence = await this.#checkpointEvidence(state, `outcome-${outcome.code}`);
+          const snapshot = await this.#control.complete(state.grant);
           const result: RunResult = {
             status: "business_outcome",
             outcome: {
@@ -701,10 +778,11 @@ export class ReplayEngine {
         }
       }
 
+      this.#assertWithinRunBudget(state);
       const knownOutcome = await this.#knownOutcome(state);
       if (knownOutcome) {
-        const snapshot = await this.#control.complete(state.grant);
         const evidence = await this.#checkpointEvidence(state, `outcome-${knownOutcome.code}`);
+        const snapshot = await this.#control.complete(state.grant);
         const result: RunResult = {
           status: "business_outcome",
           outcome: {
@@ -769,7 +847,7 @@ export class ReplayEngine {
           sessionId,
           modelCalls: ZERO_MODEL_CALLS,
         });
-        return {
+        const result: RunResult = {
           status: "needs_intervention",
           intervention,
           meta: this.#meta(
@@ -781,15 +859,17 @@ export class ReplayEngine {
             intervention.ownerEpoch,
           ),
         };
+        await this.#completeEvent(result);
+        return result;
       }
 
+      const failureEvidence = state
+        ? await this.#checkpointEvidence(state, `failure-${normalizedError.code}`).catch(() => [])
+        : [];
       const currentGrant = state?.grant ?? grant;
       const ownerEpoch = currentGrant
         ? await this.#failControl(currentGrant, normalizedError.message)
         : 0;
-      const failureEvidence = state
-        ? await this.#checkpointEvidence(state, `failure-${normalizedError.code}`).catch(() => [])
-        : [];
       const fault = {
         ...faultFrom(normalizedError, "replay", state?.currentStepId),
         evidence: failureEvidence,
@@ -801,16 +881,18 @@ export class ReplayEngine {
         sessionId,
         modelCalls: ZERO_MODEL_CALLS,
       }).catch(() => undefined);
-      if (sessionId !== "session-pending") await this.#closeFinishedSession(sessionId);
-      return {
+      const result: RunResult = {
         status: "failed",
         error: fault,
         meta: this.#meta(runId, artifact.id, artifact.digest, sessionId, startedAt, ownerEpoch),
       };
+      await this.#completeEvent(result).catch(() => undefined);
+      if (sessionId !== "session-pending") await this.#closeFinishedSession(sessionId);
+      return result;
     }
   }
 
-  #preflight(invocation: ReplayInvocation): PreflightResult {
+  #preflight(invocation: ReplayInvocation, now: Date): PreflightResult {
     let artifact: CapabilityArtifact;
     try {
       artifact = assertValidArtifact(invocation.artifact);
@@ -837,8 +919,17 @@ export class ReplayEngine {
     }
 
     try {
+      if (this.#artifactApprovalMode === "strict" && invocation.artifactApproval === undefined) {
+        throw new ArtifactApprovalError(
+          "Strict replay requires a trusted artifact approval record.",
+        );
+      }
+      if (invocation.artifactApproval !== undefined) {
+        assertArtifactApproval(artifact, invocation.artifactApproval, now);
+      }
       const binding = AppBindingSchema.parse(invocation.binding);
       const inputs = bindArtifactInputs(artifact, invocation.inputs);
+      const targets = bindReviewedTargetOverrides(artifact, binding, now);
       if (
         artifact.compatibility.product.vendor !== binding.product.vendor ||
         artifact.compatibility.product.product !== binding.product.product
@@ -860,11 +951,14 @@ export class ReplayEngine {
         artifact,
         binding,
         inputs,
+        targets,
         policy,
         entryUrl: invocationEntryUrl(invocation.targetUrl, binding.origin, route),
       };
     } catch (error: unknown) {
       const inputError = error instanceof ArtifactBindingError;
+      const approvalError = error instanceof ArtifactApprovalError;
+      const targetOverrideError = error instanceof TargetOverrideReviewError;
       return {
         ok: false,
         artifactId: artifact.id,
@@ -874,7 +968,11 @@ export class ReplayEngine {
             code: inputError ? "INPUT_INVALID" : "ARTIFACT_INVALID",
             message: inputError
               ? "Replay inputs failed the artifact contract."
-              : "The app binding is invalid or incompatible with the artifact.",
+              : approvalError
+                ? "Replay requires a current approval for this exact artifact."
+                : targetOverrideError
+                  ? "A target override is missing its exact trusted review."
+                  : "The app binding is invalid or incompatible with the artifact.",
             retryable: false,
             observed: messageOf(error),
           },
@@ -921,6 +1019,7 @@ export class ReplayEngine {
         throw error;
       }
       await this.#handleIntervention(state, normalizedError);
+      this.#assertWithinRunBudget(state);
       return this.#executeStep(step, state);
     }
   }
@@ -931,17 +1030,35 @@ export class ReplayEngine {
     }
     const previousGrant = state.grant;
     const previousObservationId = state.latestObservation.id;
-    const resolution = await this.#onIntervention({
-      runId: state.runId,
-      artifactId: state.artifact.id,
-      session: state.session,
-      currentStepId: state.currentStepId,
-      reason: error.interventionReason ?? "STUCK",
-      summary: error.message,
-      observedState: error.observed ?? "Replay reached a typed intervention boundary.",
-      automationGrant: previousGrant,
-      observation: state.latestObservation,
-    });
+    const handoffStartedAtMs = this.#monotonicNow();
+    let handoffDurationMs = 0;
+    let resolution: ReplayInterventionResolution;
+    try {
+      resolution = await this.#onIntervention({
+        runId: state.runId,
+        artifactId: state.artifact.id,
+        session: state.session,
+        currentStepId: state.currentStepId,
+        reason: error.interventionReason ?? "STUCK",
+        summary: error.message,
+        observedState: error.observed ?? "Replay reached a typed intervention boundary.",
+        automationGrant: previousGrant,
+        observation: state.latestObservation,
+      });
+    } finally {
+      handoffDurationMs = Math.max(0, this.#monotonicNow() - handoffStartedAtMs);
+      state.operatorHandoffDurationMs += handoffDurationMs;
+    }
+
+    if (resolution.automationGrant.sessionId === state.sessionId) {
+      try {
+        this.#control.assertGrant(resolution.automationGrant, "automation");
+        state.grant = resolution.automationGrant;
+      } catch {
+        // The validation below reports a stale/invalid return. Keeping the
+        // prior grant lets outer cleanup revoke whichever candidate is valid.
+      }
+    }
 
     if (
       resolution.sessionId !== state.sessionId ||
@@ -987,7 +1104,7 @@ export class ReplayEngine {
 
     state.grant = resolution.automationGrant;
     state.latestObservation = resolution.observation;
-    state.currentUrl = pathUrl(state.bindingOrigin, resolution.observation.route);
+    state.currentUrl = resolution.observation.url;
     if (resolution.observation.id === previousObservationId) {
       throw new ReplayStepError({
         code: "POSTCONDITION_FAILED",
@@ -1017,8 +1134,25 @@ export class ReplayEngine {
       newOwnerEpoch: resolution.automationGrant.epoch,
       observationId: resolution.observation.id,
       checkpointPassed: resolution.checkpoint.passed,
+      operatorHandoffDurationMs: handoffDurationMs,
       modelCalls: ZERO_MODEL_CALLS,
     });
+  }
+
+  #assertWithinRunBudget(state: ExecutionState): void {
+    const activeAutomationDurationMs = Math.max(
+      0,
+      this.#monotonicNow() - state.automationBudgetStartedAtMs - state.operatorHandoffDurationMs,
+    );
+    if (activeAutomationDurationMs > this.#runTimeoutMs) {
+      throw new ReplayStepError({
+        code: "RUN_TIMEOUT",
+        message: "Replay exceeded its configured active automation deadline.",
+        retryable: false,
+        expected: `active automation duration <= ${this.#runTimeoutMs}ms`,
+        observed: `active automation duration ${Math.round(activeAutomationDurationMs)}ms`,
+      });
+    }
   }
 
   async #executeStep(
@@ -1094,7 +1228,7 @@ export class ReplayEngine {
           });
           if (step.retry.delayMs > 0) await this.#sleep(step.retry.delayMs);
           state.latestObservation = await this.#surface.observe(state.sessionId);
-          state.currentUrl = pathUrl(state.bindingOrigin, state.latestObservation.route);
+          state.currentUrl = state.latestObservation.url;
           continue;
         }
         if (configuredRetry && attempt === step.retry.maxAttempts) {
@@ -1141,6 +1275,7 @@ export class ReplayEngine {
           inputs: { ...state.inputs },
           grant: state.grant,
           signal,
+          expectedUrl: state.currentUrl,
         });
         this.#throwIfAborted(signal);
         break;
@@ -1160,13 +1295,20 @@ export class ReplayEngine {
           inputs: { ...state.inputs },
           grant: state.grant,
           signal,
+          expectedUrl: state.currentUrl,
         });
         this.#throwIfAborted(signal);
         break;
       }
       case "press_key":
         resolveReplayElement(this.#target(state, step.target), state.latestObservation);
-        await this.#surface.pressKey(state.sessionId, step.key, state.grant, signal);
+        await this.#surface.pressKey(
+          state.sessionId,
+          step.key,
+          state.grant,
+          signal,
+          state.currentUrl,
+        );
         this.#throwIfAborted(signal);
         break;
       case "wait_for": {
@@ -1195,7 +1337,14 @@ export class ReplayEngine {
       }
       case "extract": {
         const target = this.#target(state, step.extractor.target);
-        const value = await this.#surface.extract(state.sessionId, target, step.extractor, signal);
+        const value = await this.#surface.extract(
+          state.sessionId,
+          target,
+          step.extractor,
+          signal,
+          state.grant,
+          state.currentUrl,
+        );
         this.#throwIfAborted(signal);
         state.outputs[step.output] = value;
         state.stepOutputs[step.id] = { [step.output]: value };
@@ -1217,24 +1366,26 @@ export class ReplayEngine {
     const observation = await this.#surface.observe(state.sessionId, signal);
     this.#throwIfAborted(signal);
     state.latestObservation = observation;
-    state.currentUrl = pathUrl(state.bindingOrigin, observation.route);
+    state.currentUrl = observation.url;
   }
 
   #authorize(step: Step, state: ExecutionState): void {
     const url =
       step.command === "navigate" ? pathUrl(state.bindingOrigin, step.route) : state.currentUrl;
-    enforcePolicy(state.policy, {
+    const decision = enforcePolicy(state.policy, {
       url,
       command: step.command,
       effect: step.effect,
       actor: "replay",
       runId: state.runId,
+      operationId: step.id,
       capabilityDigest: state.artifact.digest,
       sessionId: state.sessionId,
       ownerEpoch: state.grant.epoch,
       ...(state.approval ? { approval: state.approval } : {}),
       now: validDate(this.#now),
     });
+    consumeBoundApproval(decision.authorization, state.approval, state.consumedBoundApprovalIds);
   }
 
   #target(state: ExecutionState, targetId: string): TargetSpec {
@@ -1313,7 +1464,7 @@ export class ReplayEngine {
         const observation = await this.#surface.observe(state.sessionId, signal);
         this.#throwIfAborted(signal);
         state.latestObservation = observation;
-        state.currentUrl = pathUrl(state.bindingOrigin, observation.route);
+        state.currentUrl = observation.url;
         sentinel.pattern.lastIndex = 0;
         if (!sentinel.pattern.test(observation.visibleText)) {
           await this.#event({
@@ -1425,7 +1576,13 @@ export class ReplayEngine {
   async #checkpointEvidence(state: ExecutionState, label: string, signal?: AbortSignal) {
     if (!this.#evidence || !this.#screenshotRedactionVerified) return [];
     if (signal) this.#throwIfAborted(signal);
-    const screenshot = await this.#surface.captureEvidence(state.sessionId, label, signal);
+    const screenshot = await this.#surface.captureEvidence(
+      state.sessionId,
+      label,
+      signal,
+      state.currentUrl,
+      state.grant,
+    );
     if (signal) this.#throwIfAborted(signal);
     const safeLabel = label.replaceAll(/[^A-Za-z0-9._-]/gu, "-").slice(0, 100);
     const ref = await this.#evidence.writeScreenshot(
@@ -1451,6 +1608,7 @@ export class ReplayEngine {
     await this.#event({
       runId: result.meta.runId,
       type: "replay.completed",
+      timestamp: result.meta.finishedAt,
       status: result.status,
       durationMs: result.meta.durationMs,
       modelCalls: ZERO_MODEL_CALLS,

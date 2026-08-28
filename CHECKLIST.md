@@ -1,6 +1,6 @@
 # Handrail execution checklist
 
-This is the release ledger. A checked item means the final tree contains evidence that it passed. Stop-ship gates stay unchecked until verified against the public commit.
+This is the release ledger. A checked item means the stated phase produced traceable implementation or evidence. Historical v0.1 publication checks are labeled separately; they do not attest the active v0.2 candidate. Current stop-ship gates stay unchecked until verified against the new public commit.
 
 ## Phase 0 - requirements and design
 
@@ -24,7 +24,7 @@ This is the release ledger. A checked item means the final tree contains evidenc
 - [x] Label every displayed record as synthetic and seed deterministic scenarios.
 - [x] Implement Zod schemas and generated JSON Schema for artifacts, decisions, policies, bindings, events, interventions, and results.
 - [x] Implement canonical serialization, SHA-256 digest, draft/approved registry, and artifact linter.
-- [x] Implement AppBinding and product fingerprint preflight.
+- [x] Implement AppBinding, product fingerprint preflight, and digest-reviewed replay-only target overrides; reject overrides during discovery.
 - [x] Implement explicit origin, route, action, and effect policy enforcement.
 - [x] Implement classification-aware recursive redaction and canary scanning.
 - [x] Implement correlated JSONL events and evidence file references.
@@ -55,17 +55,17 @@ This is the release ledger. A checked item means the final tree contains evidenc
 - [x] Demonstrate fresh-session success replay with a different synthetic input.
 - [x] Demonstrate MEMBER_NOT_FOUND as a business outcome.
 - [x] Demonstrate transient recovery, permission failure, ambiguity failure, and policy denial.
-- [x] Install a throwing model stub during replay and prove modelCalls equals zero.
+- [x] Prove the replay module has no planner/model import edge and every replay result/event records `modelCalls: 0`.
 - [x] Phase 3 review: artifact is parameterized, replay needs no key, exceptional states never blindly proceed.
 
 ## Phase 4 - human handoff
 
-- [x] Implement control lease epochs, short-lived grants, action mutex, and guarded transitions.
+- [x] Implement bearer-capability intervention access, control lease epochs, short-lived operator claims, action serialization, and guarded transitions.
 - [x] Create contextual interventions with sanitized reason, step, state, screenshot, and allowed actions.
 - [x] Implement the concept-faithful operator console on the live session.
 - [x] Map live screenshot clicks to the same Playwright page while operator owns control.
 - [x] Support focused typing, key press, evidence capture, and return-to-automation.
-- [x] Redact and audit every human action.
+- [x] Redact every human action and persist authorization intent plus completion through evaluator audit/capture sinks; fail the lease when a configured sink fails.
 - [x] Resume with a fresh observation and current-step postcondition check.
 - [x] Reject stale claim, duplicate claim, automation-during-human-control, and stale resume.
 - [x] Demonstrate session-expiry pause -> human recovery -> resumed completion with one stable session ID.
@@ -91,13 +91,13 @@ This is the release ledger. A checked item means the final tree contains evidenc
 - [x] Finish REPORT with the seven exact headings in the required order and roughly 1-3 pages.
 - [x] Document all real, synthetic, injected, mocked, designed-only, and cut surfaces honestly.
 - [x] Build evidence/README.md as the evaluator index.
-- [x] Build evidence/manifest.json with run relationships, hashes, provenance flags, and model-call counts.
+- [x] Implement manifest v1.2 generation and validation for source/target/runtime provenance, strict artifact approval, discovery/replay relationships, model-call counts, and same-session handoff audit/capture binding.
 - [x] Validate every Markdown link, JSON file, hash, image, and requirement mapping.
 - [x] Add least-privilege CI for quality, contracts, offline integration, zero-model replay, evidence, security, and clean install.
 - [x] Run the documented evaluator path from a clean local clone.
 - [x] Phase 6 review: required names/paths/headings are exact and the repository explains itself without oral context.
 
-## Phase 7 - public release
+## Phase 7 - historical v0.1 public release
 
 - [x] Confirm no repository-name collision and authenticated write access to codelit-io.
 - [x] Inspect the exact staged diff and commit only intended project files.
@@ -110,11 +110,23 @@ This is the release ledger. A checked item means the final tree contains evidenc
 - [x] Prepare the assignment email body with the repository URL on its own line; do not send without separate authorization.
 - [x] Keep the active goal open until the public repository, final CI, anonymous clone, and GitHub release record pass.
 
+## Phase 8 - v0.2 submission-readiness audit
+
+- [x] Re-read all 10 assignment pages and reconcile the canonical SDD and requirement trace with the hardened implementation.
+- [x] Correct model-data, operator-capability, audit durability, override, malformed-input, and evidence-boundary claims across evaluator documentation.
+- [x] Complete the immutable repository security review and close all five validated source findings with focused regressions and independent bypass review.
+- [x] Preserve exactly seven required H2 headings in `REPORT.md` and validate all relative Markdown links.
+- [x] Commit the final hardened source revision before generating revision-bound evidence (`8d3029388b7dc83d71449075dca42f285e143aaf`).
+- [x] Generate and validate a fresh live manifest v1.2 bundle from that exact revision: 50 files, 13 runs, live native Ollama discovery, and artifact digest `4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11`.
+- [x] Complete and attach a same-session handoff run with two distinct manifest-bound captures, epochs 1 -> 3 -> 4, 11 operator audit events, a fresh passing checkpoint, and zero model calls.
+- [x] Re-run desktop handoff against the exact source; re-inspect the source-unchanged 1440 x 900 and 390 x 844 references, keyboard/accessibility behavior, console listeners, and all 8 unique release images.
+- [x] Run lint, typecheck, 226/226 tests, strict evidence validation, both zero-vulnerability dependency audits, targeted tracked-file hygiene checks, and a fresh 10/10 offline evaluator path.
+- [ ] Push the reviewed public revision, wait for green CI, and publish the v0.2.0 release record.
+- [ ] Clone the public revision anonymously and repeat installation, verification, evidence validation, and the offline demo.
+
 ## Public release verification
 
 - Repository: <https://github.com/codelit-io/handrail-cua>
-- Visibility: the authenticated GitHub view and an unauthenticated GitHub API request both reported `PUBLIC` / `public` with `main` as the default branch.
-- Release candidate: commit `e740dc06ecdad3be02f3a34c86373c1a7e47b8fe` passed [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185).
-- Anonymous verification: a credential-free HTTPS clone of that commit completed `npm ci`, installed Chromium, passed `npm run verify` with 111/111 tests and the 44-file/12-run evidence validator, and completed `demo:offline` with successful discovery, zero-model replay, and `MEMBER_NOT_FOUND` handling.
-- Final release: [v0.1.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) is the authoritative record for the immutable final commit and final CI URL. It is created only after this ledger commit passes the same public CI and anonymous-clone gates.
+- Historical v0.1 baseline: commit `e740dc06ecdad3be02f3a34c86373c1a7e47b8fe`, [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185), and [v0.1.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) attest the prior public tree only.
+- v0.2 candidate: record the immutable commit, manifest v1.2 validation summary, CI URL, release URL, visibility check, and anonymous-clone result here only after Phase 8 passes.
 - Submission boundary: the email body is prepared in the final handoff with the repository URL on its own line. No email is sent by this workflow.

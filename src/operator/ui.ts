@@ -12,6 +12,7 @@ function escapeHtml(value: string): string {
 function icon(kind: OperatorAuditAction | "human" | "monitor" | "warning" | "camera"): string {
   switch (kind) {
     case "human":
+    case "control_claim_authorized":
     case "control_claimed":
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7" r="3.4"/><path d="M5.8 20c.5-4 2.6-6.1 6.2-6.1s5.7 2.1 6.2 6.1"/></svg>';
     case "monitor":
@@ -30,6 +31,10 @@ function icon(kind: OperatorAuditAction | "human" | "monitor" | "warning" | "cam
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>';
     case "control_returned":
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h14M13 7l5 5-5 5"/></svg>';
+    case "operator_action_authorized":
+    case "return_control_authorized":
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
+    case "resume_checkpoint_failed":
     case "audit_sink_failed":
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></svg>';
   }
@@ -413,11 +418,15 @@ export const OPERATOR_SCRIPT = `
 
   const actionIcons = {
     automation_paused: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7v10M15 7v10"/></svg>',
+    control_claim_authorized: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
     control_claimed: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7" r="3.4"/><path d="M5.8 20c.5-4 2.6-6.1 6.2-6.1s5.7 2.1 6.2 6.1"/></svg>',
+    operator_action_authorized: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
     operator_clicked: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 3 10 9-5 1.5L10 19 7 3Z"/></svg>',
     operator_typed: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>',
     operator_pressed_key: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>',
     evidence_captured: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.4-2h7.2L17 8h3v11H4V8Z"/><circle cx="12" cy="13.5" r="3.2"/></svg>',
+    resume_checkpoint_failed: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></svg>',
+    return_control_authorized: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
     control_returned: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h14M13 7l5 5-5 5"/></svg>',
     audit_sink_failed: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></svg>'
   };
@@ -452,13 +461,21 @@ export const OPERATOR_SCRIPT = `
     );
   }
 
+  function canActNow() {
+    return ownsCurrentEpoch() && Boolean(state && state.canAct);
+  }
+
+  function canResumeNow() {
+    return ownsCurrentEpoch() && Boolean(state && state.canResume);
+  }
+
   function setControlState() {
-    const owns = ownsCurrentEpoch();
-    viewport.dataset.owned = owns ? "true" : "false";
-    resumeButton.disabled = !owns;
-    captureButton.disabled = !owns;
-    sendButton.disabled = !owns;
-    typeInput.disabled = !owns;
+    const canAct = canActNow();
+    viewport.dataset.owned = canAct ? "true" : "false";
+    resumeButton.disabled = !canResumeNow();
+    captureButton.disabled = !canAct;
+    sendButton.disabled = !canAct;
+    typeInput.disabled = !canAct;
     ownerLabel.textContent = state && state.control.owner && state.control.owner.kind === "automation"
       ? "Automation control"
       : "Human control";
@@ -528,7 +545,7 @@ export const OPERATOR_SCRIPT = `
   }
 
   async function act(path, payload, successMessage) {
-    if (!ownsCurrentEpoch()) return;
+    if (!canActNow()) return;
     try {
       await request(path, "POST", { claimId: claim.claimId, epoch: claim.epoch, ...payload });
       announce(successMessage, false);
@@ -541,7 +558,7 @@ export const OPERATOR_SCRIPT = `
   }
 
   image.addEventListener("click", async (event) => {
-    if (!ownsCurrentEpoch()) return;
+    if (!canActNow()) return;
     const rect = image.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * state.viewport.width;
     const y = ((event.clientY - rect.top) / rect.height) * state.viewport.height;
@@ -552,7 +569,7 @@ export const OPERATOR_SCRIPT = `
 
   image.addEventListener("keydown", async (event) => {
     const supported = ["Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Backspace", "Delete", "Home", "End", "PageUp", "PageDown", " "];
-    if (!supported.includes(event.key) || !ownsCurrentEpoch()) return;
+    if (!supported.includes(event.key) || !canActNow()) return;
     event.preventDefault();
     const key = event.shiftKey && event.key === "Tab" ? "Shift+Tab" : event.key === " " ? "Space" : event.key;
     await act("key", { key }, "Key acknowledged.");
@@ -560,7 +577,7 @@ export const OPERATOR_SCRIPT = `
 
   typeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!ownsCurrentEpoch() || typeInput.value.length === 0) return;
+    if (!canActNow() || typeInput.value.length === 0) return;
     const value = typeInput.value;
     try {
       await request("type", "POST", { claimId: claim.claimId, epoch: claim.epoch, value });
@@ -577,7 +594,7 @@ export const OPERATOR_SCRIPT = `
   captureButton.addEventListener("click", () => act("capture", {}, "Evidence captured."));
 
   resumeButton.addEventListener("click", async () => {
-    if (!ownsCurrentEpoch()) return;
+    if (!canResumeNow()) return;
     try {
       const result = await request("resume", "POST", { claimId: claim.claimId, epoch: claim.epoch });
       claim = undefined;

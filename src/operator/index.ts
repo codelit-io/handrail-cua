@@ -1,14 +1,26 @@
-export { OperatorConsoleError, startOperatorConsole } from "./server.js";
+export {
+  allowLoopbackDemoOperatorAction,
+  OperatorConsoleError,
+  startOperatorConsole,
+} from "./server.js";
 export type {
   OpenOperatorInterventionInput,
+  OperatorActionAuthorizer,
   OperatorAuditAction,
   OperatorAuditEvent,
+  OperatorAuditSink,
+  OperatorAuthorizationContext,
   OperatorCapture,
+  OperatorCaptureSink,
   OperatorConsoleHandle,
   OperatorConsoleOptions,
   OperatorConsoleState,
   OperatorInterventionHandle,
   OperatorObservationSummary,
+  OperatorPolicyAction,
+  OperatorPolicyDecision,
+  OperatorPolicyDenial,
+  OperatorPolicyGrant,
   OperatorResumeResult,
   ResumeCheckpointSignal,
 } from "./types.js";

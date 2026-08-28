@@ -15,6 +15,13 @@ export interface SurfaceSession {
   viewport: { width: number; height: number };
 }
 
+/** Origin/route dimensions from one independently enforced runtime policy layer. */
+export interface SurfaceAccessLayer {
+  readonly name: string;
+  readonly allowedOrigins?: readonly string[];
+  readonly allowedRoutes?: readonly string[];
+}
+
 export interface NormalizedBounds {
   x: number;
   y: number;
@@ -48,6 +55,8 @@ export interface ObservedElement {
 export interface SurfaceObservation {
   id: string;
   sessionId: string;
+  /** Exact top-level HTTP(S) URL at capture time; never a model/evidence field by default. */
+  url: string;
   route: string;
   title: string;
   capturedAt: string;
@@ -73,6 +82,10 @@ export interface PredicateContext {
   outputs: Record<string, unknown>;
   inputs: Record<string, unknown>;
   targets: Record<string, TargetSpec>;
+  /** When supplied, predicate reads execute under the active automation lease. */
+  grant?: ControlGrant;
+  /** Exact URL that was authorized before the predicate read. */
+  expectedUrl?: string;
 }
 
 export interface PredicateResult {
@@ -84,12 +97,17 @@ export interface DispatchContext {
   observationId: string;
   inputs: Record<string, unknown>;
   grant: ControlGrant;
+  /** Exact URL that policy authorized for this action. */
+  expectedUrl?: string;
   /** Replay deadlines abort this signal; adapters should stop or settle work promptly. */
   signal?: AbortSignal;
 }
 
 export interface SurfaceAdapter {
-  createSession(binding: AppBinding): Promise<SurfaceSession>;
+  createSession(
+    binding: AppBinding,
+    accessPolicy?: readonly SurfaceAccessLayer[],
+  ): Promise<SurfaceSession>;
   navigate(
     sessionId: string,
     url: string,
@@ -114,17 +132,37 @@ export interface SurfaceAdapter {
     target: TargetSpec,
     extractor: ExtractorSpec,
     signal?: AbortSignal,
+    grant?: ControlGrant,
+    expectedUrl?: string,
   ): Promise<unknown>;
   resolveValue(expression: ValueExpression, inputs: Record<string, unknown>): unknown;
-  captureEvidence(sessionId: string, label: string, signal?: AbortSignal): Promise<Buffer>;
+  captureEvidence(
+    sessionId: string,
+    label: string,
+    signal?: AbortSignal,
+    expectedUrl?: string,
+    grant?: ControlGrant,
+  ): Promise<Buffer>;
   pressKey(
     sessionId: string,
     key: string,
     grant: ControlGrant,
     signal?: AbortSignal,
+    expectedUrl?: string,
   ): Promise<ActionReceipt>;
-  clickAt(sessionId: string, x: number, y: number, grant: ControlGrant): Promise<ActionReceipt>;
-  typeFocused(sessionId: string, value: string, grant: ControlGrant): Promise<ActionReceipt>;
+  clickAt(
+    sessionId: string,
+    x: number,
+    y: number,
+    grant: ControlGrant,
+    expectedUrl?: string,
+  ): Promise<ActionReceipt>;
+  typeFocused(
+    sessionId: string,
+    value: string,
+    grant: ControlGrant,
+    expectedUrl?: string,
+  ): Promise<ActionReceipt>;
   closeSession(sessionId: string): Promise<void>;
   close(): Promise<void>;
 }

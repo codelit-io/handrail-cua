@@ -190,6 +190,20 @@ describe("recursive redaction", () => {
     assert.deepEqual(findings, [{ kind: "secret", pattern: "provider-key", count: 1 }]);
     assert.equal(JSON.stringify(findings).includes(providerKey), false);
   });
+
+  it("redacts only Luhn-valid payment-card candidates", () => {
+    const validCard = "4242 4242 4242 4242";
+    const nonLuhnNumber = "4242 4242 4242 4241";
+    const input = `valid=${validCard}; invalid=${nonLuhnNumber}`;
+
+    const redacted = redactText(input);
+    assert.equal(redacted.includes(validCard), false);
+    assert.equal(redacted.includes(nonLuhnNumber), true);
+    assert.match(redacted, /\[REDACTED:PII\]/u);
+    assert.deepEqual(findSensitivePatterns(input), [
+      { kind: "pii", pattern: "payment-card", count: 1 },
+    ]);
+  });
 });
 
 describe("sanitized evidence", () => {
@@ -223,7 +237,24 @@ describe("sanitized evidence", () => {
     );
     assert.equal(text.includes("opaque-"), false);
     assert.equal(
-      records.every((record) => record.password === SECRET_REDACTION),
+      records.every((record) => !Object.hasOwn(record, "password")),
+      true,
+    );
+    assert.equal(
+      records.every((record) => !Object.hasOwn(record, "summary")),
+      true,
+    );
+    assert.equal(
+      records.every(
+        (record) =>
+          record.schemaVersion === "1.0.0" &&
+          record.runId === "run-001" &&
+          record.correlationId === "run-001" &&
+          record.actor === "automation" &&
+          record.ownerEpoch === 0 &&
+          record.type === "action.receipt" &&
+          Object.hasOwn(record, "kind") === false,
+      ),
       true,
     );
     const ref = await writer.eventLogRef();
@@ -392,6 +423,22 @@ describe("sanitized evidence", () => {
       newOwnerEpoch: 3,
     });
     await writer.appendEvent(controlEvent);
+    await writer.appendEvent({
+      type: "operator.audit",
+      runId: "run-projection",
+      sessionId: "session-projection",
+      actor: "operator",
+      actorId: "operator-projection",
+      ownerEpoch: 3,
+      action: "operator_clicked",
+      summary: `Clicked beside ${unusualPii}.`,
+      details: {
+        effect: "commit",
+        policyGrantMode: "human_control",
+        receiptSummary: `Adapter observed ${unusualPii}.`,
+        checkpointObserved: `Recovered ${unusualPii}.`,
+      },
+    });
 
     const text = await readFile(path.join(root, "events.redacted.jsonl"), "utf8");
     assert.equal(text.includes(unusualPii), false);
@@ -403,6 +450,7 @@ describe("sanitized evidence", () => {
       decisionId: "decision-projection",
       observationId: "observation-projection",
       kind: "finish",
+      reasonCode: "planner_finish",
     });
     assert.deepEqual((records[2]?.decision as Record<string, unknown> | undefined)?.value, {
       kind: "literal",
@@ -429,6 +477,10 @@ describe("sanitized evidence", () => {
       phase: "replay",
       retryable: false,
       evidence: [],
+      diagnostic: {
+        expectedCategory: "declared_step_postcondition",
+        observedCategory: "postcondition_not_satisfied",
+      },
     });
     assert.deepEqual(records[8]?.predicate, {
       kind: "target_value_equals",
@@ -447,6 +499,11 @@ describe("sanitized evidence", () => {
     assert.doesNotThrow(() => AutomationEventSchema.parse(records[8]));
     assert.equal(records[9]?.reason, "Control reason omitted from persistent evidence.");
     assert.doesNotThrow(() => AutomationEventSchema.parse(records[9]));
+    assert.deepEqual(records[10]?.details, {
+      effect: "commit",
+      policyGrantMode: "human_control",
+    });
+    assert.equal(Object.hasOwn(records[10] ?? {}, "summary"), false);
   });
 
   it("does not invoke event getters or follow a symlinked append target", async () => {

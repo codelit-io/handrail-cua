@@ -219,6 +219,7 @@ describe("effect authorization", () => {
     effect: "commit",
     actor: "replay",
     runId: "run-commit",
+    operationId: "submit-transfer",
     capabilityDigest: "a".repeat(64),
     now,
   };
@@ -231,10 +232,11 @@ describe("effect authorization", () => {
     }
   });
 
-  it("accepts only an unexpired approval bound to the exact request", () => {
+  it("accepts only an unexpired approval bound to the exact operation", () => {
     const approval = {
       id: "approval-1",
       runId: "run-commit",
+      operationId: "submit-transfer",
       action: "activate",
       effect: "commit",
       origin: "https://bank.synthetic",
@@ -250,6 +252,7 @@ describe("effect authorization", () => {
 
     const badApprovals: readonly BoundApproval[] = [
       { ...approval, runId: "another-run" },
+      { ...approval, operationId: "confirm-another-transfer" },
       { ...approval, route: "/transfers/T-2" },
       { ...approval, action: "extract" },
       { ...approval, expiresAt: "2020-01-01T00:00:00.000Z" },
@@ -261,6 +264,16 @@ describe("effect authorization", () => {
       if (!denied.allowed) {
         assert.equal(denied.code, "APPROVAL_INVALID");
       }
+    }
+
+    const wrongOperation = checkPolicy(commitPolicy, {
+      ...commitRequest,
+      operationId: "confirm-another-transfer",
+      approval,
+    });
+    assert.equal(wrongOperation.allowed, false);
+    if (!wrongOperation.allowed) {
+      assert.equal(wrongOperation.code, "APPROVAL_INVALID");
     }
   });
 

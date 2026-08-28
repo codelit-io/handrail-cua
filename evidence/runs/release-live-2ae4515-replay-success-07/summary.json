@@ -1,0 +1,32 @@
+{
+  "kind": "replay",
+  "scenario": "success",
+  "result": {
+    "status": "succeeded",
+    "outputs": {
+      "savingsBalance": "[REDACTED:INTERNAL]"
+    },
+    "checkpointEvidence": [
+      {
+        "id": "ev_a97fc0f2d7face5b236150ab",
+        "kind": "screenshot",
+        "relativePath": "screenshots/release-live-2ae4515-replay-success-07-terminal-checkpoint.png",
+        "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
+        "byteLength": 89299,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T19:09:01.138Z"
+      }
+    ],
+    "meta": {
+      "runId": "release-live-2ae4515-replay-success-07",
+      "artifactId": "member.balance.lookup",
+      "artifactDigest": "7d630ecefe5e11341b59cba004a66c9e21b531e488c4c382dab6d8ed156a1d58",
+      "sessionId": "surface-7de1f71e-40fb-412b-885d-b9bab6a7ad4a",
+      "startedAt": "2026-08-28T19:08:58.998Z",
+      "finishedAt": "2026-08-28T19:09:01.138Z",
+      "durationMs": 2140,
+      "modelCalls": 0,
+      "ownerEpoch": 2
+    }
+  }
+}

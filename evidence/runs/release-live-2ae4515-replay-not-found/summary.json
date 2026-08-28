@@ -1,0 +1,37 @@
+{
+  "kind": "replay",
+  "scenario": "exception",
+  "result": {
+    "status": "business_outcome",
+    "outcome": {
+      "code": "MEMBER_NOT_FOUND",
+      "message": "No synthetic member matched the supplied member number.",
+      "details": {
+        "stepId": "step-02-activate-button-Find-Member",
+        "predicateMatched": true
+      }
+    },
+    "evidence": [
+      {
+        "id": "ev_e6e362c5b0ab712652dbdeca",
+        "kind": "screenshot",
+        "relativePath": "screenshots/release-live-2ae4515-replay-not-found-outcome-MEMBER_NOT_FOUND.png",
+        "sha256": "e6e362c5b0ab712652dbdeca093504c80f017240e632c393bbf8bf6eb30670cb",
+        "byteLength": 57181,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T19:09:08.568Z"
+      }
+    ],
+    "meta": {
+      "runId": "release-live-2ae4515-replay-not-found",
+      "artifactId": "member.balance.lookup",
+      "artifactDigest": "7d630ecefe5e11341b59cba004a66c9e21b531e488c4c382dab6d8ed156a1d58",
+      "sessionId": "surface-bf43b363-b5f9-4346-8b51-ef991a0f9452",
+      "startedAt": "2026-08-28T19:09:07.613Z",
+      "finishedAt": "2026-08-28T19:09:08.568Z",
+      "durationMs": 955,
+      "modelCalls": 0,
+      "ownerEpoch": 2
+    }
+  }
+}

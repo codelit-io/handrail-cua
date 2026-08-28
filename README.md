@@ -55,6 +55,8 @@ Requirements:
 
 CI pins Node.js 22.18.0 as the minimum supported baseline. Evidence records the generator's Node version for provenance, but validation remains portable across supported Node versions.
 
+Use a normal full-history Git clone for release validation. The evidence manifest is intentionally bound to its historical source revision, so a depth-limited checkout must run `git fetch --unshallow --tags` before `npm run verify`.
+
 ```bash
 npm ci
 npx playwright install chromium

@@ -247,6 +247,27 @@ describe("capability artifact contracts", () => {
     assert.ok(result.issues.some((entry) => entry.code === "DIGEST_MISMATCH"));
   });
 
+  it("does not confuse schema-validated hashes with payment data", () => {
+    const hashWithLuhnRun = `${"a".repeat(24)}4${"1".repeat(15)}${"b".repeat(24)}`;
+    const draft = validDraft();
+    draft.provenance.promptHash = hashWithLuhnRun;
+
+    const artifact = compileArtifact(draft);
+    assert.equal(lintArtifact(artifact).ok, true);
+
+    const mismatchedDigest = lintArtifact({ ...artifact, digest: hashWithLuhnRun });
+    assert.equal(mismatchedDigest.ok, false);
+    assert.ok(mismatchedDigest.issues.some((entry) => entry.code === "DIGEST_MISMATCH"));
+    assert.ok(mismatchedDigest.issues.every((entry) => entry.code !== "SENSITIVE_LITERAL"));
+
+    assert.throws(
+      () => compileArtifact({ ...draft, description: hashWithLuhnRun }),
+      (error: unknown) =>
+        error instanceof ArtifactCompilationError &&
+        error.issues.some((entry) => entry.code === "SENSITIVE_LITERAL"),
+    );
+  });
+
   it("binds a trusted artifact approval to immutable identity and valid time", () => {
     const artifact = compileArtifact(validDraft());
     const approval: ArtifactApproval = {

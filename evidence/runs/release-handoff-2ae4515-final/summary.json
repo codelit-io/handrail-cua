@@ -1,0 +1,73 @@
+{
+  "kind": "replay",
+  "scenario": "handoff",
+  "result": {
+    "status": "succeeded",
+    "outputs": {
+      "savingsBalance": "[REDACTED:INTERNAL]"
+    },
+    "checkpointEvidence": [
+      {
+        "id": "ev_b22049fd9429a75dfa49eee1",
+        "kind": "screenshot",
+        "relativePath": "screenshots/release-handoff-2ae4515-final-terminal-checkpoint.png",
+        "sha256": "b22049fd9429a75dfa49eee1721f40a6e56fcf2e66b030473eca458039572dcf",
+        "byteLength": 88088,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T19:22:32.632Z"
+      }
+    ],
+    "meta": {
+      "runId": "release-handoff-2ae4515-final",
+      "artifactId": "member.balance.lookup",
+      "artifactDigest": "7d630ecefe5e11341b59cba004a66c9e21b531e488c4c382dab6d8ed156a1d58",
+      "sessionId": "surface-2481407f-417f-4a25-88a4-3c855d6e5df7",
+      "startedAt": "2026-08-28T19:15:09.263Z",
+      "finishedAt": "2026-08-28T19:22:32.632Z",
+      "durationMs": 443369,
+      "modelCalls": 0,
+      "ownerEpoch": 5
+    }
+  },
+  "handoff": {
+    "interventionId": "handoff-release-handoff-2ae4515-final",
+    "reason": "SESSION_EXPIRED",
+    "originalSessionId": "surface-2481407f-417f-4a25-88a4-3c855d6e5df7",
+    "resumedSessionId": "surface-2481407f-417f-4a25-88a4-3c855d6e5df7",
+    "sameSession": true,
+    "automationEpochBefore": 1,
+    "operatorEpoch": 3,
+    "automationEpochAfter": 4,
+    "checkpointPassed": true,
+    "operatorAuditEvents": 13,
+    "evidence": [
+      {
+        "id": "ev_f0e06affe0e826ebc069ff88",
+        "kind": "screenshot",
+        "relativePath": "screenshots/operator-capture-7a3beab9-a6a3-446d-9c72-98c7908c7377.png",
+        "sha256": "f0e06affe0e826ebc069ff88635a3db3a01f0096776a3ef5bf1c82fc2cd613dd",
+        "byteLength": 70377,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T19:19:17.176Z"
+      },
+      {
+        "id": "ev_f0e06affe0e826ebc069ff88",
+        "kind": "screenshot",
+        "relativePath": "screenshots/operator-capture-d75c88bd-e394-4233-a3c0-a586a0300307.png",
+        "sha256": "f0e06affe0e826ebc069ff88635a3db3a01f0096776a3ef5bf1c82fc2cd613dd",
+        "byteLength": 70377,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T19:22:19.578Z"
+      },
+      {
+        "id": "ev_a01e81cd81df270b1d95780b",
+        "kind": "screenshot",
+        "relativePath": "screenshots/operator-capture-fea1e356-7055-45e7-be37-8ac9f61712da.png",
+        "sha256": "a01e81cd81df270b1d95780bc10a8eaf77afa1c8c7149157c9a249f4ab259369",
+        "byteLength": 59557,
+        "mimeType": "image/png",
+        "createdAt": "2026-08-28T19:22:28.679Z"
+      }
+    ]
+  }
+}

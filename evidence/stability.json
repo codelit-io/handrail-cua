@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0.0",
   "artifactId": "member.balance.lookup",
-  "artifactDigest": "4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11",
+  "artifactDigest": "7d630ecefe5e11341b59cba004a66c9e21b531e488c4c382dab6d8ed156a1d58",
   "requestedRuns": 10,
   "completedRuns": 10,
   "succeeded": 10,
@@ -9,71 +9,71 @@
   "allZeroModelCalls": true,
   "totalModelCalls": 0,
   "latencyMs": {
-    "min": 2065,
-    "max": 2222,
-    "mean": 2112.7,
-    "p50": 2083,
-    "p95": 2222
+    "min": 2120,
+    "max": 2217,
+    "mean": 2157.2,
+    "p50": 2140,
+    "p95": 2217
   },
   "runs": [
     {
-      "runId": "release-live-8d30293-replay-success-01",
+      "runId": "release-live-2ae4515-replay-success-01",
       "status": "succeeded",
-      "durationMs": 2222,
+      "durationMs": 2217,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-02",
+      "runId": "release-live-2ae4515-replay-success-02",
       "status": "succeeded",
-      "durationMs": 2133,
+      "durationMs": 2216,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-03",
+      "runId": "release-live-2ae4515-replay-success-03",
       "status": "succeeded",
-      "durationMs": 2114,
+      "durationMs": 2123,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-04",
+      "runId": "release-live-2ae4515-replay-success-04",
       "status": "succeeded",
-      "durationMs": 2068,
+      "durationMs": 2158,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-05",
+      "runId": "release-live-2ae4515-replay-success-05",
       "status": "succeeded",
-      "durationMs": 2066,
+      "durationMs": 2135,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-06",
+      "runId": "release-live-2ae4515-replay-success-06",
       "status": "succeeded",
-      "durationMs": 2101,
+      "durationMs": 2182,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-07",
+      "runId": "release-live-2ae4515-replay-success-07",
       "status": "succeeded",
-      "durationMs": 2083,
+      "durationMs": 2140,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-08",
+      "runId": "release-live-2ae4515-replay-success-08",
       "status": "succeeded",
-      "durationMs": 2065,
+      "durationMs": 2141,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-09",
+      "runId": "release-live-2ae4515-replay-success-09",
       "status": "succeeded",
-      "durationMs": 2200,
+      "durationMs": 2140,
       "modelCalls": 0
     },
     {
-      "runId": "release-live-8d30293-replay-success-10",
+      "runId": "release-live-2ae4515-replay-success-10",
       "status": "succeeded",
-      "durationMs": 2075,
+      "durationMs": 2120,
       "modelCalls": 0
     }
   ]

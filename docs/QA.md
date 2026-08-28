@@ -24,7 +24,7 @@ npm run demo:offline -- --replays 10 --output <fresh-directory>
 credential-free clone -> install -> verify -> offline demo
 ```
 
-Final candidate record: source revision `8d3029388b7dc83d71449075dca42f285e143aaf` produced the checked-in live manifest v1.2 bundle. It contains 50 files and 13 runs: one four-decision native Ollama discovery, 10/10 successful fresh-session zero-model replays, one zero-model `MEMBER_NOT_FOUND` outcome, and one zero-model same-session handoff. Replay latency was 2,112.7 ms mean and 2,222 ms p95. The 18 referenced PNGs reduce to 8 unique images; every unique image received a manual pixel review.
+Final candidate record: source revision `2ae4515747c49b11ae49dfd6fbd44b730113ab49` produced the checked-in live manifest v1.2 bundle. It contains 51 files and 13 runs: one four-decision native Ollama discovery with zero recoveries, 10/10 successful fresh-session zero-model replays, one zero-model `MEMBER_NOT_FOUND` outcome, and one zero-model same-session handoff. The artifact digest is `7d630ecefe5e11341b59cba004a66c9e21b531e488c4c382dab6d8ed156a1d58`; replay latency was 2,157.2 ms mean, 2,140 ms p50, and 2,217 ms p95. The 19 referenced PNGs reduce to 8 unique images; every unique image received a manual pixel review.
 
 The checked-in release bundle is separate from the offline smoke. For a v0.2.0 release, manifest v1.2 must bind a genuine native Ollama discovery, strict artifact approval, at least ten fresh-session zero-model replays of the exact compiled digest, an exceptional `business_outcome / MEMBER_NOT_FOUND` replay, and a successfully resumed same-session handoff. `npm run evidence:validate` is the authoritative completion signal.
 
@@ -40,13 +40,15 @@ The checked-in release bundle is separate from the offline smoke. For a v0.2.0 r
 
 ## Required automated commands
 
-Run from a clean checkout:
+Run from a clean, full-history checkout:
 
 ```bash
 npm ci
 npx playwright install chromium
 npm run verify
 ```
+
+The manifest is bound to historical source revision `2ae4515747c49b11ae49dfd6fbd44b730113ab49`. A normal clone contains that revision. If an evaluator intentionally uses a shallow checkout, run `git fetch --unshallow --tags` before verification; absence of the bound source commit is a deliberate validation failure.
 
 `npm run verify` is the release gate for formatting/lint, TypeScript, tests, and the sanitized evidence manifest. The GitHub workflow repeats the same sequence on Linux with no model credential and read-only repository permissions.
 
@@ -91,7 +93,7 @@ The final candidate pass must exercise the target and operator console at a 1440
 - [x] Confirm target and operator console/page-error listeners are clean.
 - [x] Confirm target, Ollama, and operator endpoints remain local or explicitly authorized.
 
-The exact-source desktop handoff was completed manually through the standalone operator console. The accepted 1440 x 900 desktop and 390 x 844 mobile references were re-inspected after the final source run; the intervening source changes affect discovery decision binding and replay time accounting, not operator markup or styling. Real-Chromium E2E additionally re-exercised same-session recovery, keyboard/action authorization, page-error listeners, and responsive control behavior.
+The exact-source desktop handoff was completed manually through the standalone operator console. Run `release-handoff-2ae4515-final` retained one surface session, recorded epochs 1 -> 3 -> 4, 13 durable operator audit events, three policy-bound captures, a fresh passing resume checkpoint, and zero model calls. Two captures intentionally contain the same expired-state pixels because the operator captured that state twice; the later restored-state capture is byte-distinct and follows the authorized recovery click. The accepted 1440 x 900 desktop and 390 x 844 mobile references were re-inspected after the final source run. Real-Chromium E2E additionally re-exercised same-session recovery, keyboard/action authorization, page-error listeners, and responsive control behavior.
 
 ## Visual fidelity and accessibility ledger
 
@@ -131,7 +133,7 @@ The final local hygiene pass used the evidence contract, targeted tracked-file p
 
 ## Evaluator-friendly evidence manifest
 
-Manifest v1.2 records the bundle timestamp, live/scripted mode, planner-transport identity, model identity and digest, source revision/tree, bundled-fixture target source, generator Node and Playwright versions, effective screenshot-input setting, sanitized invocation, artifact and strict approval paths/hashes, stability report path/hash, and each discovery/replay/handoff run's identity, summary, events, and complete screenshot-ref inventory. The validator cross-checks the source revision/tree and target fixture, schema-checks the recorded Node version, matches the installed Playwright version, and verifies run/summary identities, artifact approval and replay binding, zero-model replays, JSONL shape, screenshot path/hash/length/MIME/signature, filesystem containment, duplicate or orphan content, sensitive-text patterns, and the complete handoff lifecycle.
+Manifest v1.2 records the bundle timestamp, live/scripted mode, planner-transport identity, model identity and digest, source revision/tree, bundled-fixture target source, generator Node and Playwright versions, effective screenshot-input setting, sanitized invocation, artifact and strict approval paths/hashes, stability report path/hash, and each discovery/replay/handoff run's identity, summary, events, and complete screenshot-ref inventory. The validator cross-checks the source revision/tree and target fixture, schema-checks the recorded Node version, matches the installed Playwright version, and verifies run/summary identities, artifact approval and replay binding, zero-model replays, JSONL shape, screenshot path/hash/length/MIME/signature, filesystem containment, duplicate or orphan content, sensitive-text patterns, and the complete handoff lifecycle. Repeated same-state captures are permitted only when every capture remains uniquely audit-bound and at least one byte-distinct capture pair brackets an authorized recovery click.
 
 The final run-evidence review additionally reconciled:
 
@@ -193,8 +195,10 @@ Do not release or describe the assignment as complete if any of these is true:
 
 ## Public release verification
 
-The public repository is [codelit-io/handrail-cua](https://github.com/codelit-io/handrail-cua). Reviewed candidate `131567b61f86c5ffd83ef839c31764e441bb1073` was merged without squashing through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1) as `175dc614d3d89def523f3ffbc1755748540df127`. [GitHub Actions run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed on that public merge, and GitHub reported the repository as `PUBLIC`.
+The public repository is [codelit-io/handrail-cua](https://github.com/codelit-io/handrail-cua). The initial v0.2 candidate was merged through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1), and [GitHub Actions run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed, but an exact-tag smoke exposed a nondeterministic Luhn false positive in schema-validated SHA values. That candidate was not released. The narrow fix exempts only schema-typed digest paths; identical untyped hash-shaped strings remain scanned.
 
-A separate HTTPS clone with GitHub tokens unset and credential lookup disabled resolved public `main` to the same merge. From that clone, `npm ci`, `npx playwright install chromium`, and `npm run verify` passed: 226/226 tests, real-Chromium E2E, and strict validation of the committed 50-file/13-run manifest. A newly generated offline smoke completed 10/10 fresh-session replays with zero replay model calls; its separate exception replay returned `business_outcome / MEMBER_NOT_FOUND` with zero model calls. [v0.2.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) records the final immutable tag and release verification sources.
+The final refresh retains runtime source revision `2ae4515747c49b11ae49dfd6fbd44b730113ab49`, adds the 51-file evidence bundle, and adds a regression for repeated pre-recovery captures without weakening the byte-distinct before/after requirement. A credential-free full-history clone of the final public tree passed locked installation, Chromium setup, 228/228 tests, real-Chromium E2E, strict evidence validation, and a new 10/10 zero-model smoke whose exception path returned `business_outcome / MEMBER_NOT_FOUND` with zero model calls.
+
+Exact-tag QA exercised both depth-limited and full-history behavior. The depth-limited checkout correctly rejected the unavailable evidence source revision. The full-history `v0.2.0` checkout passed the same 228-test, evidence, and offline-smoke gates. [v0.2.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) records the final immutable tag, release commit, main CI run, and post-publication verification sources without embedding a self-referential release hash in this file.
 
 [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185) and [v0.1.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) remain historical evidence for the prior baseline only.

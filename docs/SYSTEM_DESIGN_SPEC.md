@@ -264,6 +264,7 @@ Artifact-controlled native regular expressions are not an execution primitive. S
 - Local Ollama is the default and evidence path.
 - Raw invocation input/output values are replaced by `{available, classification}` metadata.
 - Known non-public values are masked if echoed in a semantic observation; route, role, input type, context, and goal text pass the same generic secret/PII/card redactor, including separator-aware Luhn-valid card detection.
+- Sensitive scanning is type-aware at the artifact and structured-evidence boundaries: only strict schema fields already validated as SHA-1/SHA-256 values bypass payment-card heuristics, while an identical hash-shaped value in any untyped field remains scanned and rejected.
 - Screenshot input defaults off for every provider, requires explicit vision opt-in, and the manifest records the effective CLI-or-environment setting.
 - A non-loopback Ollama or OpenAI-compatible endpoint requires both HTTPS and `HANDRAIL_ALLOW_REMOTE_MODEL_EGRESS=true`; API keys and semantic data are never sent over remote cleartext HTTP.
 - Native Ollama, OpenAI-compatible, and scripted transports have non-interchangeable provenance identities; reserved native provider names cannot be supplied by the compatible transport.

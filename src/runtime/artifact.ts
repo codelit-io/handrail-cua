@@ -433,9 +433,15 @@ function looksSensitiveString(value: string): boolean {
   return findSensitivePatterns(value).length > 0;
 }
 
+const SCHEMA_VALIDATED_HASH_PATHS = new Set(["$.digest", "$.provenance.promptHash"]);
+
+function isSchemaValidatedHash(path: string, value: string): boolean {
+  return SCHEMA_VALIDATED_HASH_PATHS.has(path) && /^[a-f0-9]{64}$/u.test(value);
+}
+
 function lintSensitiveStrings(value: unknown, path: string, issues: ArtifactLintIssue[]): void {
   if (typeof value === "string") {
-    if (looksSensitiveString(value)) {
+    if (!isSchemaValidatedHash(path, value) && looksSensitiveString(value)) {
       issues.push(
         issue(
           "SENSITIVE_LITERAL",

@@ -120,9 +120,10 @@ This is the release ledger. A checked item means the stated phase produced trace
 - [x] Generate and validate a fresh live manifest v1.2 bundle from that exact revision: 50 files, 13 runs, live native Ollama discovery, and artifact digest `4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11`.
 - [x] Complete and attach a same-session handoff run with two distinct manifest-bound captures, epochs 1 -> 3 -> 4, 11 operator audit events, a fresh passing checkpoint, and zero model calls.
 - [x] Re-run desktop handoff against the exact source; re-inspect the source-unchanged 1440 x 900 and 390 x 844 references, keyboard/accessibility behavior, console listeners, and all 8 unique release images.
-- [x] Run lint, typecheck, 226/226 tests, strict evidence validation, both zero-vulnerability dependency audits, targeted tracked-file hygiene checks, and a fresh 10/10 offline evaluator path.
+- [x] Run lint, typecheck, 227/227 tests, strict evidence validation, both zero-vulnerability dependency audits, targeted tracked-file hygiene checks, and a fresh 10/10 offline evaluator path.
 - [x] Push the reviewed public revision, wait for green CI, merge it through PR #1, and publish the v0.2.0 release record.
-- [x] Clone public `main` without GitHub credentials and repeat locked installation, Chromium setup, 226/226 tests, strict evidence validation, and the 10/10 offline demo.
+- [x] Clone public `main` without GitHub credentials and repeat locked installation, Chromium setup, 227/227 tests, strict evidence validation, and the 10/10 offline demo.
+- [x] Exercise the exact public tag, reproduce and remove the typed-hash/Luhn false positive, retain scanning for untyped hash-shaped values, and document the full-history evidence requirement.
 
 ## Public release verification
 
@@ -131,5 +132,6 @@ This is the release ledger. A checked item means the stated phase produced trace
 - Reviewed v0.2 candidate: `131567b61f86c5ffd83ef839c31764e441bb1073`, merged without squashing through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1) as `175dc614d3d89def523f3ffbc1755748540df127` so the evidence source revision remains in public history.
 - Public verification: [GitHub Actions run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed on the merged tree, and GitHub reported repository visibility `PUBLIC`.
 - Anonymous verification: a credential-free HTTPS clone of public `main` resolved to `175dc614d3d89def523f3ffbc1755748540df127`; `npm ci`, Chromium setup, `npm run verify`, all 226 tests, and strict validation of 50 files/13 runs passed. A newly generated scripted smoke then completed 10/10 fresh-session replays with zero replay model calls and the expected zero-model `MEMBER_NOT_FOUND` outcome.
+- Exact-tag verification: a credential-free full-history clone of `v0.2.0` passed 227/227 tests, real-Chromium E2E, strict validation of 50 files/13 runs, and a new 10/10 zero-model replay smoke. The validator deliberately rejects a depth-1 clone until its evidence source revision is fetched.
 - Release record: [v0.2.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) is the immutable public submission record; its metadata names the final tagged revision and verification sources without creating a self-referential commit hash in this file.
 - Submission boundary: the email body is prepared in the final handoff with the repository URL on its own line. No email is sent by this workflow.

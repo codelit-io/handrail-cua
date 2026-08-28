@@ -40,13 +40,15 @@ The checked-in release bundle is separate from the offline smoke. For a v0.2.0 r
 
 ## Required automated commands
 
-Run from a clean checkout:
+Run from a clean, full-history checkout:
 
 ```bash
 npm ci
 npx playwright install chromium
 npm run verify
 ```
+
+The manifest is bound to historical source revision `8d3029388b7dc83d71449075dca42f285e143aaf`. A normal clone contains that revision. If an evaluator intentionally uses a shallow checkout, run `git fetch --unshallow --tags` before verification; absence of the bound source commit is a deliberate validation failure.
 
 `npm run verify` is the release gate for formatting/lint, TypeScript, tests, and the sanitized evidence manifest. The GitHub workflow repeats the same sequence on Linux with no model credential and read-only repository permissions.
 
@@ -195,6 +197,8 @@ Do not release or describe the assignment as complete if any of these is true:
 
 The public repository is [codelit-io/handrail-cua](https://github.com/codelit-io/handrail-cua). Reviewed candidate `131567b61f86c5ffd83ef839c31764e441bb1073` was merged without squashing through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1) as `175dc614d3d89def523f3ffbc1755748540df127`. [GitHub Actions run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed on that public merge, and GitHub reported the repository as `PUBLIC`.
 
-A separate HTTPS clone with GitHub tokens unset and credential lookup disabled resolved public `main` to the same merge. From that clone, `npm ci`, `npx playwright install chromium`, and `npm run verify` passed: 226/226 tests, real-Chromium E2E, and strict validation of the committed 50-file/13-run manifest. A newly generated offline smoke completed 10/10 fresh-session replays with zero replay model calls; its separate exception replay returned `business_outcome / MEMBER_NOT_FOUND` with zero model calls. [v0.2.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) records the final immutable tag and release verification sources.
+A separate HTTPS clone with GitHub tokens unset and credential lookup disabled resolved public `main` to the same merge. From that clone, `npm ci`, `npx playwright install chromium`, and `npm run verify` passed: 226/226 tests, real-Chromium E2E, and strict validation of the committed 50-file/13-run manifest. A newly generated offline smoke completed 10/10 fresh-session replays with zero replay model calls; its separate exception replay returned `business_outcome / MEMBER_NOT_FOUND` with zero model calls.
+
+Exact-tag QA subsequently exercised both depth-1 and full-history clones. The depth-1 checkout correctly rejected the unavailable evidence source revision. The full-history `v0.2.0` checkout passed 227/227 tests, real-Chromium E2E, strict evidence validation, and a new 10/10 zero-model smoke after a narrow regression fix prevented schema-validated SHA values from being misclassified as payment data. Untyped hash-shaped strings remain scanned. [v0.2.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) records the final immutable tag and release verification sources.
 
 [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185) and [v0.1.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) remain historical evidence for the prior baseline only.

@@ -281,6 +281,7 @@ afterEach(async () => {
 
 describe("strict screenshot evidence validation", () => {
   it("scans structured string values without treating numeric geometry as payment data", () => {
+    const hashWithLuhnRun = `${"a".repeat(24)}4${"1".repeat(15)}${"b".repeat(24)}`;
     assert.deepEqual(
       findSensitiveEvidencePatterns(
         "artifact.json",
@@ -299,6 +300,20 @@ describe("strict screenshot evidence validation", () => {
       findSensitiveEvidencePatterns(
         "artifact.json",
         JSON.stringify({ leakedNumericValue: 4242424242424242 }),
+      ),
+      [{ kind: "pii", pattern: "payment-card", count: 1 }],
+    );
+    assert.deepEqual(
+      findSensitiveEvidencePatterns(
+        "artifact.json",
+        JSON.stringify({ promptHash: hashWithLuhnRun, sha256: hashWithLuhnRun }),
+      ),
+      [],
+    );
+    assert.deepEqual(
+      findSensitiveEvidencePatterns(
+        "artifact.json",
+        JSON.stringify({ leakedHashShapedValue: hashWithLuhnRun }),
       ),
       [{ kind: "pii", pattern: "payment-card", count: 1 }],
     );

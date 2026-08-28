@@ -1991,9 +1991,31 @@ function withoutRedactionMarkers(value: string): string {
     .replaceAll(INTERNAL_REDACTION, "");
 }
 
-function structuredStringValues(value: unknown, strings: string[]): void {
+const SHA256_FIELD_NAMES = new Set([
+  "artifactApprovalDigest",
+  "artifactApprovalSha256",
+  "artifactDigest",
+  "artifactSha256",
+  "baseTargetDigest",
+  "digest",
+  "eventsSha256",
+  "overrideTargetDigest",
+  "promptHash",
+  "sha256",
+  "sourceTreeSha256",
+  "summarySha256",
+  "surfaceFingerprint",
+  "targetFixtureSha256",
+]);
+
+function isSchemaValidatedDigest(field: string | undefined, value: string): boolean {
+  if (field === "sourceRevision") return /^[a-f0-9]{40}$/u.test(value);
+  return field !== undefined && SHA256_FIELD_NAMES.has(field) && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function structuredStringValues(value: unknown, strings: string[], field?: string): void {
   if (typeof value === "string") {
-    strings.push(value);
+    if (!isSchemaValidatedDigest(field, value)) strings.push(value);
     return;
   }
   if (
@@ -2005,11 +2027,11 @@ function structuredStringValues(value: unknown, strings: string[]): void {
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) structuredStringValues(item, strings);
+    for (const item of value) structuredStringValues(item, strings, field);
     return;
   }
   if (typeof value === "object" && value !== null) {
-    for (const item of Object.values(value)) structuredStringValues(item, strings);
+    for (const [key, item] of Object.entries(value)) structuredStringValues(item, strings, key);
   }
 }
 
@@ -2031,9 +2053,10 @@ function aggregateSensitivePatterns(values: readonly string[]): SensitivePattern
 
 /**
  * Scan human-authored text as a document, but scan JSON evidence by string value.
- * Decimal JSON fields are typed geometry rather than human text; treating a long
- * fractional coordinate as a payment-card candidate creates a cross-type false positive.
- * Large safe integers remain scanned so numeric card-shaped values still fail closed.
+ * Decimal JSON fields are typed geometry rather than human text, and strict hash fields
+ * are schema-validated digests rather than content. Treating either as a payment-card
+ * candidate creates a cross-type false positive. Large safe integers and hash-shaped
+ * strings outside the exact digest fields remain scanned and fail closed.
  */
 export function findSensitiveEvidencePatterns(
   relativePath: string,

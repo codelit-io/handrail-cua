@@ -656,7 +656,12 @@ describe("bounded model-driven discovery", () => {
       "observation-3",
       "observation-4",
     ]);
-    assert.deepEqual(planner.allowedActionSets.at(-1), ["finish", "request_help"]);
+    assert.deepEqual(planner.allowedActionSets, [
+      ["set_value"],
+      ["activate"],
+      ["extract"],
+      ["finish"],
+    ]);
     assert.deepEqual(planner.boundInputSets, [[], ["memberId"], ["memberId"], ["memberId"]]);
     assert.equal(planner.allowedActionSets[1]?.includes("set_value"), false);
     assert.deepEqual(planner.allowedElementRefSets[1]?.activate, ["find"]);
@@ -863,7 +868,7 @@ describe("bounded model-driven discovery", () => {
       rationale: "A session boundary cannot be bypassed safely.",
     }));
     const result = await new DiscoveryEngine({ surface, planner, control, policy }).discover(
-      request(),
+      request({ allowProactiveModelIntervention: true }),
     );
 
     assert.equal(result.status, "needs_intervention");
@@ -929,7 +934,7 @@ describe("bounded model-driven discovery", () => {
           checkpoint: { passed: true, observed: "Synthetic session restored." },
         };
       },
-    }).discover(request());
+    }).discover(request({ allowProactiveModelIntervention: true }));
 
     assert.equal(result.status, "succeeded");
     assert.equal(result.sessionId, surface.session.id);
@@ -963,7 +968,7 @@ describe("bounded model-driven discovery", () => {
           checkpoint: { passed: false, observed: "Synthetic recovery did not pass." },
         };
       },
-    }).discover(request());
+    }).discover(request({ allowProactiveModelIntervention: true }));
 
     assert.equal(result.status, "failed");
     if (result.status === "failed") assert.equal(result.error.code, "POSTCONDITION_FAILED");
@@ -998,7 +1003,7 @@ describe("bounded model-driven discovery", () => {
           checkpoint: { passed: true, observed: "Synthetic session restored." },
         };
       },
-    }).discover(request());
+    }).discover(request({ allowProactiveModelIntervention: true }));
 
     assert.equal(result.status, "failed");
     if (result.status === "failed") assert.equal(result.error.code, "CONTROL_LOST");
@@ -1089,13 +1094,26 @@ describe("bounded model-driven discovery", () => {
 
   it("bounds known transient recovery and the total model action budget", async () => {
     const surface = new FakeSurface({ transientFirstObservation: true });
-    const planner = new FixedPlanner((plannerRequest, callCount) => ({
-      kind: "wait",
-      decisionId: `decision-wait-${callCount}`,
-      observationId: plannerRequest.observation.id,
-      durationMs: 50,
-      rationale: "Wait only within the configured bounded loop.",
-    }));
+    const planner = new FixedPlanner((plannerRequest, callCount) => {
+      const common = {
+        decisionId: `decision-progress-${callCount}`,
+        observationId: plannerRequest.observation.id,
+        rationale: "Make only policy-qualified progress within the configured bounded loop.",
+      };
+      if (callCount === 1) {
+        return {
+          ...common,
+          kind: "set_value",
+          elementRef: plannerRequest.allowedElementRefs?.set_value?.[0] ?? "missing",
+          value: { kind: "input", name: "memberId" },
+        };
+      }
+      return {
+        ...common,
+        kind: "activate",
+        elementRef: plannerRequest.allowedElementRefs?.activate?.[0] ?? "missing",
+      };
+    });
     const result = await new DiscoveryEngine({
       surface,
       planner,

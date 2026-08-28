@@ -157,6 +157,8 @@ export interface DiscoveryRequest {
   /** Must be explicitly true; the adapter is responsible for pixel masking. */
   readonly screenshotsRedactionVerified?: true;
   readonly artifactEvidencePath?: string;
+  /** Test/embedding override; default arbitration offers help only when no safe progress exists. */
+  readonly allowProactiveModelIntervention?: boolean;
 }
 
 export interface DiscoveryEngineOptions {
@@ -977,29 +979,24 @@ export class DiscoveryEngine {
     const outputsComplete = Object.keys(request.artifact.outputs).every(
       (outputName) => run.outputs[outputName] !== undefined,
     );
-    const activationEffects = run.observation.elements.flatMap((element) => {
-      const policy = activationPolicyFor(element, request.artifact);
-      return policy ? [policy.effect] : [];
-    });
-    const activationAllowed = activationEffects.some(
-      (effect) =>
-        checkPolicy(this.#policy, {
-          url,
-          command: "activate",
-          effect,
-          actor: "discovery",
-          runId: run.runId,
-          sessionId: run.sessionId,
-          ownerEpoch: run.grant.epoch,
-        }).allowed,
-    );
     const alreadyBound = new Set(boundInputNames(run));
     const hasUnboundInput = Object.keys(request.artifact.inputs).some(
       (inputName) => !alreadyBound.has(inputName),
     );
-    const hasEligibleOutput = Object.values(this.#allowedOutputRefs(run, request)).some(
-      (refs) => refs.length > 0,
-    );
+    const allowedOutputRefs = this.#allowedOutputRefs(run, request);
+    const allowedElementRefs = this.#allowedElementRefs(run, request, allowedOutputRefs);
+    const hasEligibleOutput = Object.values(allowedOutputRefs).some((refs) => refs.length > 0);
+    const canSetInput =
+      !outputsComplete &&
+      !hasEligibleOutput &&
+      hasUnboundInput &&
+      allowedElementRefs.set_value.length > 0;
+    const canActivate =
+      !outputsComplete &&
+      !hasEligibleOutput &&
+      !canSetInput &&
+      allowedElementRefs.activate.length > 0;
+    const noSafeProgress = !outputsComplete && !hasEligibleOutput && !canSetInput && !canActivate;
     const candidates: Array<{
       kind: DiscoveryModelAction;
       command?: RuntimeCommand;
@@ -1010,14 +1007,14 @@ export class DiscoveryEngine {
         kind: "set_value",
         command: "set_value",
         effect: "reversible_write",
-        enabled: !outputsComplete && hasUnboundInput,
+        enabled: canSetInput,
       },
       {
         kind: "activate",
         effect: "read",
-        enabled: !outputsComplete && activationAllowed,
+        enabled: canActivate,
       },
-      { kind: "wait", command: "wait_for", effect: "read", enabled: !outputsComplete },
+      { kind: "wait", command: "wait_for", effect: "read", enabled: noSafeProgress },
       {
         kind: "extract",
         command: "extract",
@@ -1029,7 +1026,11 @@ export class DiscoveryEngine {
         effect: "read",
         enabled: outputsComplete,
       },
-      { kind: "request_help", effect: "read", enabled: true },
+      {
+        kind: "request_help",
+        effect: "read",
+        enabled: noSafeProgress || request.allowProactiveModelIntervention === true,
+      },
     ];
     return candidates.flatMap((candidate) => {
       if (!candidate.enabled) return [];

@@ -1820,7 +1820,7 @@ function assertHandoffBinding(
     throw new Error(`Replay ${runId} handoff capture count is inconsistent.`);
   }
   const captureIds = new Set<string>();
-  const captureHashes = new Set<string>();
+  const capturesWithPositions: Array<{ readonly index: number; readonly sha256: string }> = [];
   const evidencePaths = new Set<string>();
   for (const event of captureEvents) {
     const captureId = requiredCaptureDetail(runId, event, "captureId") as string;
@@ -1838,27 +1838,19 @@ function assertHandoffBinding(
       throw new Error(`Replay ${runId} handoff capture audit is not bound to screenshot evidence.`);
     }
     captureIds.add(captureId);
-    captureHashes.add(captureSha256);
+    capturesWithPositions.push({ index: operatorEvents.indexOf(event), sha256: captureSha256 });
     evidencePaths.add(evidence.relativePath);
   }
   if (evidencePaths.size !== handoff.evidence.length) {
     throw new Error(`Replay ${runId} handoff screenshot evidence is not uniquely audit-bound.`);
   }
-  const firstCaptureIndex = operatorEvents.indexOf(
-    captureEvents[0] as (typeof captureEvents)[number],
-  );
-  const lastCaptureIndex = operatorEvents.indexOf(
-    captureEvents.at(-1) as (typeof captureEvents)[number],
-  );
-  const hasBracketedRecoveryClick = operatorEvents.some(
-    (event, index) =>
-      event.action === "operator_clicked" && index > firstCaptureIndex && index < lastCaptureIndex,
-  );
-  if (
-    captureEvents.length < 2 ||
-    captureHashes.size !== captureEvents.length ||
-    !hasBracketedRecoveryClick
-  ) {
+  const hasDistinctBracketedRecoveryEvidence = operatorEvents.some((event, clickIndex) => {
+    if (event.action !== "operator_clicked") return false;
+    const before = capturesWithPositions.filter((capture) => capture.index < clickIndex);
+    const after = capturesWithPositions.filter((capture) => capture.index > clickIndex);
+    return before.some((earlier) => after.some((later) => earlier.sha256 !== later.sha256));
+  });
+  if (captureEvents.length < 2 || !hasDistinctBracketedRecoveryEvidence) {
     throw new Error(
       `Replay ${runId} must prove distinct before/after captures around an authorized recovery click.`,
     );

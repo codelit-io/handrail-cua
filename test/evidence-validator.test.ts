@@ -647,45 +647,56 @@ describe("strict screenshot evidence validation", () => {
     if (!handoffRun) throw new Error("Fixture has no handoff replay.");
 
     let firstCapture: MutableEvidenceRef | undefined;
-    let secondCapture: MutableEvidenceRef | undefined;
+    let otherCaptures: MutableEvidenceRef[] = [];
     await updateRunSummary(root, handoffRun, (summary) => {
       firstCapture = summary.handoff?.evidence[0];
-      secondCapture = summary.handoff?.evidence[1];
-      if (!firstCapture || !secondCapture) {
+      otherCaptures = summary.handoff?.evidence.slice(1) ?? [];
+      if (!firstCapture || otherCaptures.length === 0) {
         throw new Error("Handoff fixture needs before and after captures.");
       }
-      secondCapture.id = firstCapture.id;
-      secondCapture.sha256 = firstCapture.sha256;
-      secondCapture.byteLength = firstCapture.byteLength;
+      for (const capture of otherCaptures) {
+        capture.id = firstCapture.id;
+        capture.sha256 = firstCapture.sha256;
+        capture.byteLength = firstCapture.byteLength;
+      }
     });
-    if (!firstCapture || !secondCapture) {
+    if (!firstCapture || otherCaptures.length === 0) {
       throw new Error("Handoff fixture capture mutation was not retained.");
     }
-    await copyFile(
-      path.join(root, handoffRun.directory, firstCapture.relativePath),
-      path.join(root, handoffRun.directory, secondCapture.relativePath),
+    for (const capture of otherCaptures) {
+      await copyFile(
+        path.join(root, handoffRun.directory, firstCapture.relativePath),
+        path.join(root, handoffRun.directory, capture.relativePath),
+      );
+      const manifestRef = handoffRun.screenshots.find(
+        (ref) => ref.relativePath === `${handoffRun.directory}/${capture.relativePath}`,
+      );
+      if (!manifestRef) throw new Error("Handoff manifest lacks an after capture.");
+      manifestRef.sha256 = firstCapture.sha256;
+      manifestRef.byteLength = firstCapture.byteLength;
+    }
+    const reboundCaptureIds = new Set(
+      otherCaptures.map((capture) => path.posix.basename(capture.relativePath, ".png")),
     );
-    const secondManifestRef = handoffRun.screenshots.find(
-      (ref) => ref.relativePath === `${handoffRun.directory}/${secondCapture?.relativePath}`,
-    );
-    if (!secondManifestRef) throw new Error("Handoff manifest lacks the after capture.");
-    secondManifestRef.sha256 = firstCapture.sha256;
-    secondManifestRef.byteLength = firstCapture.byteLength;
-    const secondCaptureId = path.posix.basename(secondCapture.relativePath, ".png");
     await updateRunEvents(root, handoffRun, (events) => {
-      const captureEvent = events.find(
+      const captureEvents = events.filter(
         (event) =>
           event.type === "operator.audit" &&
           event.action === "evidence_captured" &&
           typeof event.details === "object" &&
           event.details !== null &&
-          (event.details as Record<string, unknown>).captureId === secondCaptureId,
+          reboundCaptureIds.has(String((event.details as Record<string, unknown>).captureId)),
       );
-      if (!captureEvent || typeof captureEvent.details !== "object" || !captureEvent.details) {
-        throw new Error("Handoff fixture lacks the after capture audit.");
+      if (captureEvents.length !== reboundCaptureIds.size) {
+        throw new Error("Handoff fixture lacks an after capture audit.");
       }
-      (captureEvent.details as Record<string, unknown>).sha256 = firstCapture?.sha256;
-      (captureEvent.details as Record<string, unknown>).byteLength = firstCapture?.byteLength;
+      for (const captureEvent of captureEvents) {
+        if (typeof captureEvent.details !== "object" || !captureEvent.details) {
+          throw new Error("Handoff fixture has an invalid after capture audit.");
+        }
+        (captureEvent.details as Record<string, unknown>).sha256 = firstCapture?.sha256;
+        (captureEvent.details as Record<string, unknown>).byteLength = firstCapture?.byteLength;
+      }
     });
     await writeJson(manifestPath, manifest);
 
@@ -693,6 +704,21 @@ describe("strict screenshot evidence validation", () => {
       validateEvidenceBundle(root),
       /distinct before\/after captures around an authorized recovery click/u,
     );
+  });
+
+  it("accepts repeated same-state captures when distinct recovery evidence brackets the click", async () => {
+    const root = await clonedEvidence();
+    const manifest = await readJson<MutableManifest>(path.join(root, "manifest.json"));
+    const handoffRun = manifest.runs.find((run) => run.scenario === "handoff");
+    if (!handoffRun) throw new Error("Fixture has no handoff replay.");
+    const summary = await readJson<MutableSummary>(path.join(root, handoffRun.summary));
+    const captures = summary.handoff?.evidence ?? [];
+    const hashes = captures.map((capture) => capture.sha256);
+
+    assert.ok(captures.length >= 3, "Fixture must include an extra same-state capture.");
+    assert.ok(new Set(hashes).size < hashes.length, "Fixture must include repeated capture bytes.");
+    assert.ok(new Set(hashes).size >= 2, "Fixture must retain distinct after-recovery evidence.");
+    await validateEvidenceBundle(root);
   });
 
   it("rejects operator completions without a matching pre-dispatch authorization event", async () => {

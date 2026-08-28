@@ -116,22 +116,22 @@ This is the release ledger. A checked item means the stated phase produced trace
 - [x] Correct model-data, operator-capability, audit durability, override, malformed-input, and evidence-boundary claims across evaluator documentation.
 - [x] Complete the immutable repository security review and close all five validated source findings with focused regressions and independent bypass review.
 - [x] Preserve exactly seven required H2 headings in `REPORT.md` and validate all relative Markdown links.
-- [x] Commit the final hardened source revision before generating revision-bound evidence (`8d3029388b7dc83d71449075dca42f285e143aaf`).
-- [x] Generate and validate a fresh live manifest v1.2 bundle from that exact revision: 50 files, 13 runs, live native Ollama discovery, and artifact digest `4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11`.
-- [x] Complete and attach a same-session handoff run with two distinct manifest-bound captures, epochs 1 -> 3 -> 4, 11 operator audit events, a fresh passing checkpoint, and zero model calls.
+- [x] Commit the final hardened runtime source revision before generating revision-bound evidence (`2ae4515747c49b11ae49dfd6fbd44b730113ab49`).
+- [x] Generate and validate a fresh live manifest v1.2 bundle from that exact revision: 51 files, 13 runs, four-decision native Ollama discovery with zero recoveries, and artifact digest `7d630ecefe5e11341b59cba004a66c9e21b531e488c4c382dab6d8ed156a1d58`.
+- [x] Complete and attach a same-session handoff run with three manifest-bound operator captures, including byte-distinct states around the recovery click, epochs 1 -> 3 -> 4, 13 operator audit events, a fresh passing checkpoint, and zero model calls.
 - [x] Re-run desktop handoff against the exact source; re-inspect the source-unchanged 1440 x 900 and 390 x 844 references, keyboard/accessibility behavior, console listeners, and all 8 unique release images.
-- [x] Run lint, typecheck, 227/227 tests, strict evidence validation, both zero-vulnerability dependency audits, targeted tracked-file hygiene checks, and a fresh 10/10 offline evaluator path.
-- [x] Push the reviewed public revision, wait for green CI, merge it through PR #1, and publish the v0.2.0 release record.
-- [x] Clone public `main` without GitHub credentials and repeat locked installation, Chromium setup, 227/227 tests, strict evidence validation, and the 10/10 offline demo.
-- [x] Exercise the exact public tag, reproduce and remove the typed-hash/Luhn false positive, retain scanning for untyped hash-shaped values, and document the full-history evidence requirement.
+- [x] Run lint, typecheck, 228/228 tests, strict evidence validation, both zero-vulnerability dependency audits, targeted tracked-file hygiene checks, and a fresh 10/10 offline evaluator path.
+- [x] Publish the evidence refresh through a reviewed PR, wait for green main CI, replace the not-yet-released v0.2.0 candidate tag, and create the immutable GitHub release record.
+- [x] Clone public `main` without GitHub credentials and repeat locked installation, Chromium setup, 228/228 tests, strict validation of 51 files/13 runs, and the 10/10 offline demo.
+- [x] Exercise a full-history clone of the exact public tag, retain the deliberate shallow-clone failure for unavailable evidence history, and record the post-publication result in GitHub release metadata.
 
 ## Public release verification
 
 - Repository: <https://github.com/codelit-io/handrail-cua>
 - Historical v0.1 baseline: commit `e740dc06ecdad3be02f3a34c86373c1a7e47b8fe`, [GitHub Actions run 33141788185](https://github.com/codelit-io/handrail-cua/actions/runs/33141788185), and [v0.1.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.1.0) attest the prior public tree only.
-- Reviewed v0.2 candidate: `131567b61f86c5ffd83ef839c31764e441bb1073`, merged without squashing through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1) as `175dc614d3d89def523f3ffbc1755748540df127` so the evidence source revision remains in public history.
-- Public verification: [GitHub Actions run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed on the merged tree, and GitHub reported repository visibility `PUBLIC`.
-- Anonymous verification: a credential-free HTTPS clone of public `main` resolved to `175dc614d3d89def523f3ffbc1755748540df127`; `npm ci`, Chromium setup, `npm run verify`, all 226 tests, and strict validation of 50 files/13 runs passed. A newly generated scripted smoke then completed 10/10 fresh-session replays with zero replay model calls and the expected zero-model `MEMBER_NOT_FOUND` outcome.
-- Exact-tag verification: a credential-free full-history clone of `v0.2.0` passed 227/227 tests, real-Chromium E2E, strict validation of 50 files/13 runs, and a new 10/10 zero-model replay smoke. The validator deliberately rejects a depth-1 clone until its evidence source revision is fetched.
+- Superseded v0.2 candidate: `131567b61f86c5ffd83ef839c31764e441bb1073`, merged without squashing through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1) as `175dc614d3d89def523f3ffbc1755748540df127`; [GitHub Actions run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed. An exact-tag smoke later exposed the typed-hash/Luhn false positive, so that unreleased candidate was not submitted.
+- Final runtime source basis: `2ae4515747c49b11ae49dfd6fbd44b730113ab49`. The manifest binds this commit's `src/` tree; the release commit adds the validated evidence, validator regression, and documentation without changing that runtime tree.
+- Anonymous verification: a credential-free, full-history HTTPS clone of the final public tree passed `npm ci`, Chromium setup, 228/228 tests, real-Chromium E2E, strict validation of 51 files/13 runs, and a newly generated 10/10 zero-model replay smoke with the expected zero-model `MEMBER_NOT_FOUND` outcome.
+- Exact-tag verification: a credential-free full-history clone of `v0.2.0` passed the same 228-test, evidence, and offline-smoke gates. The validator deliberately rejects a depth-1 clone until its bound source revision is fetched.
 - Release record: [v0.2.0](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) is the immutable public submission record; its metadata names the final tagged revision and verification sources without creating a self-referential commit hash in this file.
 - Submission boundary: the email body is prepared in the final handoff with the repository URL on its own line. No email is sent by this workflow.

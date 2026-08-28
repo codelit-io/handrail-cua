@@ -1,62 +1,56 @@
 # Handrail evidence bundle
 
-This is the evaluator index for sanitized release evidence. Every visible record is synthetic. A release candidate must provide a machine-readable [manifest](manifest.json) using schema v1.2 that binds source, target, runtime, model, artifact approval, discovery, replay, exception, handoff, event-log, and screenshot provenance. `npm run evidence:validate` is the authority for whether the checked-in bundle is release-valid; prose in this file does not override that result.
+This is the evaluator index for the sanitized v0.2.0 release evidence. The bundle was generated against the repository's conspicuously synthetic legacy member-services target. It contains no real customer system, account, credential, browser storage, model transcript, or remote production interaction.
 
-## Acceptance contract
+## Acceptance snapshot
 
-| Claim | Manifest v1.2 proof |
+| Property | Validated value |
 | --- | --- |
-| Genuine discovery | Exactly one live native Ollama discovery with `transport: native-ollama`, the selected model digest, `liveModel: true`, one or more model decisions, fresh semantic observations, semantic-only model input, the internally started bundled fixture, and model/artifact provenance that agrees across the manifest, summary, events, and capability. |
-| Reviewable artifact | One typed capability with a valid canonical digest plus a current strict approval record bound to its ID, revision, digest, reviewer, approval timestamp, and optional expiry. Qualifying live generation pauses after discovery and requires that record to be issued through a separate approval command before replay. |
-| Deterministic replay | At least ten manifest-matched successful fresh-session runs in [the stability report](stability.json), each bound to the exact artifact and recording zero model calls. |
-| Expected exception | At least one exceptional replay that preserves `business_outcome / MEMBER_NOT_FOUND` and records zero model calls. |
-| Same-session handoff | At least one successful handoff replay whose result, original/resumed session ID, monotonic ownership epochs, pre-dispatch authorizations, completed operator actions, fresh resume checkpoint, and capture hashes agree across the summary, events, and manifest. |
+| Contract | manifest v1.2.0, live mode, 51 files, 13 runs |
+| Runtime source | `2ae4515747c49b11ae49dfd6fbd44b730113ab49` |
+| Target | internally started `bundled-fixture`; screenshot model input disabled |
+| Discovery | `release-live-2ae4515-discovery`; 4 native Ollama decisions; 0 recoveries |
+| Model | local `qwen3:4b`; transport `native-ollama`; digest `359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7` |
+| Artifact | `member.balance.lookup` revision 1; digest `7d630ecefe5e11341b59cba004a66c9e21b531e488c4c382dab6d8ed156a1d58` |
+| Approval | separately issued by `independent-process-review` at `2026-08-28T19:08:45.788Z` |
+| Stability | 10/10 fresh-session successes; 0 replay model calls |
+| Latency | min 2,120 ms; mean 2,157.2 ms; p50 2,140 ms; p95/max 2,217 ms |
+| Expected exception | `business_outcome / MEMBER_NOT_FOUND`; 0 model calls |
+| Handoff | same session; epochs 1 -> 3 -> 4; 13 operator audit events; 3 captures; fresh passing checkpoint; 0 model calls |
+| Images | 19 PNG files, 8 unique pixel hashes; every unique image manually inspected |
 
-## Validated v0.2.0 snapshot
+The reviewer label documents a separate local approval command after artifact inspection. It is not a claim of a third-party auditor or external attestation.
 
-- Source revision: `8d3029388b7dc83d71449075dca42f285e143aaf`
-- Live planner: native Ollama `qwen3:4b`, digest `359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7`, semantic-only input, four observation-bound decisions
-- Capability: `member.balance.lookup` revision 1, digest `4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11`, separately reviewed and approved after discovery
-- Deterministic proof: 10/10 successful fresh-session replays, zero replay model calls, mean 2,112.7 ms, p95 2,222 ms
-- Exception proof: `business_outcome / MEMBER_NOT_FOUND`, zero model calls
-- Handoff proof: one unchanged surface session, ownership epochs 1 -> 3 -> 4, 11 operator audit events, two operator captures, passing fresh resume checkpoint, and zero model calls
-- Bundle inventory: manifest v1.2, 50 files, 13 runs, 18 referenced PNGs, and 8 unique images
+## Read this evidence in order
 
-These values are also machine-derived from [the manifest](manifest.json), [the stability report](stability.json), and the manifest-bound run records. Regenerate the bundle rather than editing them independently.
+1. [Manifest](manifest.json) binds runtime and target provenance, model identity, artifact and approval hashes, stability, every run, and every screenshot reference.
+2. [Compiled capability](artifacts/member.balance.lookup.v1.json) is the immutable declarative artifact; [approval](artifacts/member.balance.lookup.v1.approval.json) is a separate digest-bound decision.
+3. [Discovery summary](runs/release-live-2ae4515-discovery/summary.json) and [redacted event log](runs/release-live-2ae4515-discovery/events.redacted.jsonl) prove fresh observation/decision/action bindings and artifact compilation.
+4. [Stability report](stability.json) binds all ten successful fresh-session replays to the same artifact digest with zero replay model calls. One representative [success summary](runs/release-live-2ae4515-replay-success-01/summary.json) includes its typed result and terminal checkpoint.
+5. [Not-found summary](runs/release-live-2ae4515-replay-not-found/summary.json) preserves the declared business outcome rather than collapsing it into success or a generic fault.
+6. [Handoff summary](runs/release-handoff-2ae4515-final/summary.json) and [redacted audit log](runs/release-handoff-2ae4515-final/events.redacted.jsonl) prove exclusive same-session operator recovery and return to automation.
 
-## Evidence boundary
+The handoff includes two identical expired-state captures because the operator pressed capture twice before recovery, plus one byte-distinct restored-state capture after the authorized click. This is retained rather than edited away. Validation requires every capture to remain uniquely audit-bound and requires a byte-distinct pair on opposite sides of the recovery click.
 
-The manifest inventories every retained run summary, redacted JSONL event log, and PNG screenshot by bounded relative path, SHA-256 hash, byte length, and MIME type. The validator also checks native planner transport/model identity, effective screenshot-input and bundled-target provenance, PNG structure, CRCs, bounded dimensions, decompression, and scanlines, canonical run layout, duplicate/orphan files, contiguous event order, replay duration timestamps, approval-after-discovery ordering, run identity, artifact/result binding, source revision/tree agreement, the recorded generator Node version's schema, the installed Playwright version, and sensitive-text patterns.
+## Visual QA anchors
 
-The bundle excludes raw prompts, model responses, request bodies, browser storage, cookies, URL-fragment capabilities, ownership claims, credentials, and real PII. Redacted JSONL retains structural observation metadata, decision/action kinds, safe reason codes, and action receipts; it omits page text, planner rationale, typed values, and other free-form surface/model text. Retained browser screenshots are allowed only for the conspicuously labeled synthetic fixture and still require manual pixel review.
+- [Initial discovery state](runs/release-live-2ae4515-discovery/screenshots/002-observation-4aa77c2b-48b1-403e-8161-3ef4aa50aab3.png)
+- [Successful replay checkpoint](runs/release-live-2ae4515-replay-success-01/screenshots/release-live-2ae4515-replay-success-01-terminal-checkpoint.png)
+- [Expected not-found outcome](runs/release-live-2ae4515-replay-not-found/screenshots/release-live-2ae4515-replay-not-found-outcome-MEMBER_NOT_FOUND.png)
+- [Expired handoff state](runs/release-handoff-2ae4515-final/screenshots/operator-capture-7a3beab9-a6a3-446d-9c72-98c7908c7377.png)
+- [Restored handoff state](runs/release-handoff-2ae4515-final/screenshots/operator-capture-fea1e356-7055-45e7-be37-8ac9f61712da.png)
+- [Resumed terminal checkpoint](runs/release-handoff-2ae4515-final/screenshots/release-handoff-2ae4515-final-terminal-checkpoint.png)
 
-The handoff record is part of manifest v1.2 rather than a separate narrative claim. Evaluator entrypoints persist an authorization-intent event before each operator surface action and a completion event afterward. If a configured audit or capture sink fails, the control lease fails and resume is blocked. The URL-fragment capability remains reusable for the intervention lifetime but is retained only as a server-side digest and is never release evidence.
+Every image displays the synthetic-data banner. Screenshot evidence is safe here only because the target is a local fixture; a production adapter would need masking before capture.
 
-## Reproduce
+## Reproduce the gate
 
-Validate the committed evidence without Ollama or an API key:
+Use a full-history checkout because the manifest intentionally binds a historical source commit:
 
 ```bash
 npm ci
 npx playwright install chromium
-npm run evidence:validate
+npm run verify
 ```
 
-Generate a new live discovery/replay bundle locally from a committed source tree:
-
-```bash
-HANDRAIL_OLLAMA_BASE_URL=http://127.0.0.1:11434 \
-HANDRAIL_MODEL=qwen3:4b \
-npm run demo:live -- \
-  --run-id assignment-live \
-  --replays 10 \
-  --artifact-approval work/assignment-live-approval/artifact-approval.json \
-  --source-revision "$(git rev-parse HEAD)" \
-  --output work/assignment-live-evidence
-```
-
-When the command reports `awaiting_approval`, review its persisted artifact and run `npm run approve` into the declared external approval directory. A qualifying live run rejects a pre-existing approval path, validates approval chronology, and pins the native Ollama digest before and after model use.
-
-Revision-bound generation rejects a source revision that is not the checked-out commit and rejects uncommitted `src/` changes. Evidence writes are immutable and refuse to replace an existing file. Use a new disposable `--output` path unless intentionally preparing a fresh release bundle.
-
-The same-session run is interactive and is attached after it successfully resumes. Follow [the demo guide](../docs/DEMO.md) for the exact handoff, attachment, and combined validation commands. Do not publish a generated bundle until every unique screenshot has been manually inspected and the combined manifest passes validation.
+`npm run evidence:validate` may be run independently. It rejects missing historical source, mutable or orphaned files, source/target/model/artifact drift, invalid approval chronology, replay model calls, malformed event order, substituted handoff sessions, stale epochs, unbound captures, invalid PNGs, unsupported files, and sensitive structured text. A depth-limited clone must fetch full history before this check can succeed.

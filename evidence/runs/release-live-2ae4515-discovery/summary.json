@@ -1,0 +1,68 @@
+{
+  "kind": "discovery",
+  "status": "succeeded",
+  "runId": "release-live-2ae4515-discovery",
+  "sessionId": "surface-63ef5f27-108e-4ffc-bbaa-b90b93a130fa",
+  "modelCalls": 4,
+  "recoveries": 0,
+  "evidence": [
+    {
+      "id": "ev_23731926f19eb0fe441c901d",
+      "kind": "screenshot",
+      "relativePath": "screenshots/002-observation-4aa77c2b-48b1-403e-8161-3ef4aa50aab3.png",
+      "sha256": "23731926f19eb0fe441c901d3e7e5ec59d14643f2810a418df7362f3bde245d1",
+      "byteLength": 55071,
+      "mimeType": "image/png",
+      "createdAt": "2026-08-28T19:07:28.410Z"
+    },
+    {
+      "id": "ev_a92ae318ba9e7b5d0392025e",
+      "kind": "screenshot",
+      "relativePath": "screenshots/005-observation-af35cecb-3d72-4001-97e7-7ecca84abfe0.png",
+      "sha256": "a92ae318ba9e7b5d0392025ef3e465f0280139252d25246547656ff8891968a6",
+      "byteLength": 55776,
+      "mimeType": "image/png",
+      "createdAt": "2026-08-28T19:07:39.633Z"
+    },
+    {
+      "id": "ev_cdb884a7cfc5e1a2cb1543d9",
+      "kind": "screenshot",
+      "relativePath": "screenshots/009-observation-b480e2a4-89dd-4ff9-8a32-187abb4969ae.png",
+      "sha256": "cdb884a7cfc5e1a2cb1543d948890e1b3c19885a31683ddf954198bdd8a9532d",
+      "byteLength": 89128,
+      "mimeType": "image/png",
+      "createdAt": "2026-08-28T19:07:47.821Z"
+    },
+    {
+      "id": "ev_cdb884a7cfc5e1a2cb1543d9",
+      "kind": "screenshot",
+      "relativePath": "screenshots/013-observation-0aa1850b-f670-44f5-a807-8ef7417a14ef.png",
+      "sha256": "cdb884a7cfc5e1a2cb1543d948890e1b3c19885a31683ddf954198bdd8a9532d",
+      "byteLength": 89128,
+      "mimeType": "image/png",
+      "createdAt": "2026-08-28T19:08:02.484Z"
+    },
+    {
+      "id": "ev_d799cc82ff8ac65e98a39ee6",
+      "kind": "artifact",
+      "relativePath": "artifact.json",
+      "sha256": "d799cc82ff8ac65e98a39ee6403d7d09d65f9730b3e9f30b79ba9df5ef420fe7",
+      "byteLength": 10378,
+      "mimeType": "application/json",
+      "createdAt": "2026-08-28T19:08:16.297Z"
+    }
+  ],
+  "artifactId": "member.balance.lookup",
+  "artifactDigest": "7d630ecefe5e11341b59cba004a66c9e21b531e488c4c382dab6d8ed156a1d58",
+  "provenance": {
+    "discoveryRunId": "release-live-2ae4515-discovery",
+    "provider": "ollama-local",
+    "modelId": "qwen3:4b",
+    "promptHash": "0e2b1ec22dc44c2cf47a47e67711a2182549b61f8584a5c27b37bda265ff8b36",
+    "liveModel": true,
+    "createdAt": "2026-08-28T19:08:16.268Z"
+  },
+  "outputs": {
+    "savingsBalance": "[REDACTED:INTERNAL]"
+  }
+}

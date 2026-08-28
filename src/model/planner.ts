@@ -22,6 +22,8 @@ export interface PlannerRequest {
   allowedElementRefs?: Readonly<
     Partial<Record<"set_value" | "activate" | "extract", readonly string[]>>
   >;
+  /** Exact output-to-element pairs admitted by the deterministic discovery envelope. */
+  allowedOutputRefs?: Readonly<Record<string, readonly string[]>>;
 }
 
 export interface PlannerResponse {
@@ -349,8 +351,9 @@ function ollamaDecisionSchema(request: PlannerRequest): Record<string, unknown> 
     request.allowedElementRefs?.[kind] ?? elementRefs;
   const boundInputs = new Set(request.boundInputs ?? []);
   const inputNames = Object.keys(request.inputs).filter((name) => !boundInputs.has(name));
-  const outputNames =
-    Object.keys(request.outputs).length > 0 ? Object.keys(request.outputs) : ["savingsBalance"];
+  const outputNames = Object.keys(request.outputSpecs).filter(
+    (name) => !Object.hasOwn(request.outputs, name),
+  );
   const commonProperties = {
     decisionId: identifier,
     observationId: { type: "string", const: request.observation.id },
@@ -422,18 +425,21 @@ function ollamaDecisionSchema(request: PlannerRequest): Record<string, unknown> 
           ),
         ];
       case "extract":
-        return refsFor("extract").length === 0
-          ? []
-          : [
-              objectVariant(
-                {
-                  kind: { const: "extract" },
-                  elementRef: { type: "string", enum: refsFor("extract") },
-                  output: { type: "string", enum: outputNames },
-                },
-                ["kind", "elementRef", "output"],
-              ),
-            ];
+        return outputNames.flatMap((outputName) => {
+          const outputRefs = request.allowedOutputRefs?.[outputName] ?? refsFor("extract");
+          return outputRefs.length === 0
+            ? []
+            : [
+                objectVariant(
+                  {
+                    kind: { const: "extract" },
+                    elementRef: { type: "string", enum: outputRefs },
+                    output: { type: "string", const: outputName },
+                  },
+                  ["kind", "elementRef", "output"],
+                ),
+              ];
+        });
       case "finish":
         return [
           objectVariant(
@@ -555,6 +561,7 @@ export class OpenAiCompatiblePlanner implements DiscoveryPlanner {
             capturedOutputs: classifiedAvailability(request.outputs, request.outputSpecs),
             allowedActions: request.allowedActions,
             allowedElementRefs: request.allowedElementRefs ?? {},
+            allowedOutputRefs: request.allowedOutputRefs ?? {},
             observation: modelSafeObservation(request.observation, request),
           }),
         },
@@ -707,6 +714,7 @@ export class OllamaPlanner implements DiscoveryPlanner {
           capturedOutputs: classifiedAvailability(request.outputs, request.outputSpecs),
           allowedActions: request.allowedActions,
           allowedElementRefs: request.allowedElementRefs ?? {},
+          allowedOutputRefs: request.allowedOutputRefs ?? {},
           currentObservation: modelSafeObservation(request.observation, request),
         }),
       };

@@ -72,6 +72,14 @@ export type InterventionReason = InterventionView["reason"];
 export interface DiscoveryOutputBinding {
   readonly source?: "text" | "value";
   readonly transforms?: readonly ("trim" | "currency_to_number" | "number")[];
+  /** Stable semantic identity required before this output may be extracted. */
+  readonly target: {
+    readonly role?: string;
+    readonly name?: string;
+    readonly precedingLabel?: string;
+    readonly rowLabel?: string;
+    readonly columnLabel?: string;
+  };
 }
 
 export interface DiscoveryActivationPolicy {
@@ -302,6 +310,20 @@ function activationPolicyFor(
   );
 }
 
+function matchesOutputTarget(
+  element: ObservedElement,
+  target: DiscoveryOutputBinding["target"],
+): boolean {
+  return (
+    (target.role === undefined || element.role === target.role) &&
+    (target.name === undefined || element.name === target.name) &&
+    (target.precedingLabel === undefined ||
+      element.context.precedingLabel === target.precedingLabel) &&
+    (target.rowLabel === undefined || element.context.rowLabel === target.rowLabel) &&
+    (target.columnLabel === undefined || element.context.columnLabel === target.columnLabel)
+  );
+}
+
 function decisionEffect(
   decision: DiscoveryModelDecision,
   element: ObservedElement | undefined,
@@ -335,7 +357,9 @@ function elementForDecision(
   return observation.elements.find((element) => element.ref === decision.elementRef);
 }
 
-function defaultOutputBinding(spec: OutputSpec): Required<DiscoveryOutputBinding> {
+function defaultOutputBinding(
+  spec: OutputSpec,
+): Required<Pick<DiscoveryOutputBinding, "source" | "transforms">> {
   if (spec.validator.kind === "number") {
     return { source: "text", transforms: ["trim", "currency_to_number"] };
   }
@@ -601,6 +625,37 @@ export class DiscoveryEngine {
     for (const [name, spec] of Object.entries(request.artifact.outputs)) {
       IdentifierSchema.parse(name);
       OutputSpecSchema.parse(spec);
+      const bindingSpec = request.artifact.outputBindings?.[name];
+      if (!bindingSpec) {
+        throw new TypeError(`Discovery output ${name} requires a semantic output binding.`);
+      }
+      if (
+        bindingSpec.source !== undefined &&
+        bindingSpec.source !== "text" &&
+        bindingSpec.source !== "value"
+      ) {
+        throw new TypeError(`Discovery output ${name} has an invalid extraction source.`);
+      }
+      for (const transform of bindingSpec.transforms ?? []) {
+        if (transform !== "trim" && transform !== "currency_to_number" && transform !== "number") {
+          throw new TypeError(`Discovery output ${name} has an invalid transform.`);
+        }
+      }
+      const targetEntries = Object.entries(bindingSpec.target);
+      if (
+        targetEntries.length === 0 ||
+        targetEntries.some(([, value]) => typeof value !== "string" || !value.trim())
+      ) {
+        throw new TypeError(
+          `Discovery output ${name} requires at least one non-empty semantic target field.`,
+        );
+      }
+    }
+    const unknownOutputBindings = Object.keys(request.artifact.outputBindings ?? {}).filter(
+      (name) => !outputNames.includes(name),
+    );
+    if (unknownOutputBindings.length > 0) {
+      throw new TypeError(`Discovery output binding ${unknownOutputBindings[0]} is undeclared.`);
     }
     for (const outcome of request.artifact.outcomes ?? []) KnownOutcomeSpecSchema.parse(outcome);
     for (const [name, target] of Object.entries(request.artifact.staticTargets ?? {})) {
@@ -724,7 +779,8 @@ export class DiscoveryEngine {
       }
 
       const allowedActions = this.#allowedActions(run, request);
-      const allowedElementRefs = this.#allowedElementRefs(run, request);
+      const allowedOutputRefs = this.#allowedOutputRefs(run, request);
+      const allowedElementRefs = this.#allowedElementRefs(run, request, allowedOutputRefs);
       let response: PlannerResponse;
       run.modelCalls += 1;
       try {
@@ -738,6 +794,7 @@ export class DiscoveryEngine {
           observation: run.observation,
           allowedActions,
           allowedElementRefs,
+          allowedOutputRefs,
         });
       } catch (error) {
         throw this.#fault(
@@ -849,11 +906,37 @@ export class DiscoveryEngine {
     ) {
       throw new Error(`The planner referenced an element not authorized for ${decision.kind}.`);
     }
+    if (
+      decision.kind === "extract" &&
+      !this.#allowedOutputRefs(run, request)[decision.output]?.includes(decision.elementRef)
+    ) {
+      throw new Error("The planner referenced an element not authorized for the selected output.");
+    }
+  }
+
+  #allowedOutputRefs(
+    run: MutableRun,
+    request: DiscoveryRequest,
+  ): Readonly<Record<string, readonly string[]>> {
+    return Object.fromEntries(
+      Object.keys(request.artifact.outputs)
+        .filter((outputName) => run.outputs[outputName] === undefined)
+        .map((outputName) => {
+          const bindingSpec = request.artifact.outputBindings?.[outputName];
+          const refs = bindingSpec
+            ? run.observation.elements
+                .filter((element) => matchesOutputTarget(element, bindingSpec.target))
+                .map((element) => element.ref)
+            : [];
+          return [outputName, refs] as const;
+        }),
+    );
   }
 
   #allowedElementRefs(
     run: MutableRun,
     request: DiscoveryRequest,
+    outputRefs: Readonly<Record<string, readonly string[]>> = this.#allowedOutputRefs(run, request),
   ): Readonly<Record<"set_value" | "activate" | "extract", readonly string[]>> {
     const url = run.observation.url;
     return {
@@ -885,7 +968,7 @@ export class DiscoveryEngine {
           }).allowed;
         })
         .map((element) => element.ref),
-      extract: run.observation.elements.map((element) => element.ref),
+      extract: unique(Object.values(outputRefs).flat()),
     };
   }
 
@@ -914,6 +997,9 @@ export class DiscoveryEngine {
     const hasUnboundInput = Object.keys(request.artifact.inputs).some(
       (inputName) => !alreadyBound.has(inputName),
     );
+    const hasEligibleOutput = Object.values(this.#allowedOutputRefs(run, request)).some(
+      (refs) => refs.length > 0,
+    );
     const candidates: Array<{
       kind: DiscoveryModelAction;
       command?: RuntimeCommand;
@@ -936,11 +1022,7 @@ export class DiscoveryEngine {
         kind: "extract",
         command: "extract",
         effect: "read",
-        enabled:
-          !outputsComplete &&
-          Object.keys(request.artifact.outputs).some(
-            (outputName) => run.outputs[outputName] === undefined,
-          ),
+        enabled: !outputsComplete && hasEligibleOutput,
       },
       {
         kind: "finish",

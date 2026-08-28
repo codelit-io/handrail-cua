@@ -327,6 +327,7 @@ class ObservationPlanner implements DiscoveryPlanner {
   readonly allowedActionSets: ModelDecision["kind"][][] = [];
   readonly boundInputSets: string[][] = [];
   readonly allowedElementRefSets: PlannerRequest["allowedElementRefs"][] = [];
+  readonly allowedOutputRefSets: PlannerRequest["allowedOutputRefs"][] = [];
 
   get callCount(): number {
     return this.#callCount;
@@ -354,6 +355,7 @@ class ObservationPlanner implements DiscoveryPlanner {
     this.allowedActionSets.push([...request.allowedActions]);
     this.boundInputSets.push([...(request.boundInputs ?? [])]);
     this.allowedElementRefSets.push(request.allowedElementRefs);
+    this.allowedOutputRefSets.push(request.allowedOutputRefs);
     const common = {
       decisionId: `decision-${this.#callCount}`,
       observationId: request.observation.id,
@@ -511,6 +513,13 @@ function request(overrides: Partial<DiscoveryRequest> = {}): DiscoveryRequest {
           validator: { kind: "number", minimum: 0 },
         },
       },
+      outputBindings: {
+        savingsBalance: {
+          source: "text",
+          transforms: ["trim", "currency_to_number"],
+          target: { role: "cell", rowLabel: "Savings", columnLabel: "Current balance" },
+        },
+      },
       activationPolicies: [
         {
           role: "button",
@@ -566,6 +575,30 @@ describe("bounded model-driven discovery", () => {
     assert.equal(result.sessionId, null);
     assert.equal(result.error.code, "INPUT_INVALID");
     assert.equal(result.error.phase, "preflight");
+    assert.equal(surface.observeCount, 0);
+    assert.equal(planner.callCount, 0);
+  });
+
+  it("requires every output to declare a semantic extraction target before opening a surface", async () => {
+    const surface = new FakeSurface();
+    const planner = new ObservationPlanner();
+    const baseline = request();
+    const result = await new DiscoveryEngine({
+      surface,
+      planner,
+      control: new ControlCoordinator(),
+      policy,
+    }).discover(
+      request({
+        artifact: { ...baseline.artifact, outputBindings: {} },
+      }),
+    );
+
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.equal(result.sessionId, null);
+      assert.equal(result.error.phase, "preflight");
+    }
     assert.equal(surface.observeCount, 0);
     assert.equal(planner.callCount, 0);
   });
@@ -628,6 +661,10 @@ describe("bounded model-driven discovery", () => {
     assert.equal(planner.allowedActionSets[1]?.includes("set_value"), false);
     assert.deepEqual(planner.allowedElementRefSets[1]?.activate, ["find"]);
     assert.equal(planner.allowedElementRefSets[1]?.activate?.includes("member-input"), false);
+    assert.deepEqual(
+      planner.allowedOutputRefSets.map((items) => items?.savingsBalance ?? []),
+      [[], [], ["balance"], []],
+    );
     assert.equal(
       planner.allowedActionSets.some((actions) => actions.includes("activate_coordinate")),
       false,

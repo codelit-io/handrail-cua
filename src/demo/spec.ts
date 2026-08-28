@@ -75,7 +75,11 @@ export const DEMO_ARTIFACT_SPEC: DiscoveryArtifactSpec = {
   ],
   staticTargets: { "member-not-found": MEMBER_NOT_FOUND_TARGET },
   outputBindings: {
-    savingsBalance: { source: "text", transforms: ["trim", "currency_to_number"] },
+    savingsBalance: {
+      source: "text",
+      transforms: ["trim", "currency_to_number"],
+      target: { role: "cell", rowLabel: "Savings", columnLabel: "Current balance" },
+    },
   },
   activationPolicies: [
     {

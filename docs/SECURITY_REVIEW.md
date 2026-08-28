@@ -1,6 +1,6 @@
 # Security Review Snapshot
 
-This document records the immutable pre-remediation security review of the Handrail v0.2 candidate. It is a review snapshot, not evidence that the findings have been fixed or that the release is ready to submit.
+This document records the immutable pre-remediation review of the Handrail v0.2 candidate and the evidence used to close every resulting release gate. The snapshot preserves what was originally assessed; the status tables record the reviewed remediations and final public verification.
 
 The assessed working tree was based on revision `cc43457f53c7785a7316300f0012fa9838a2b54c` and sealed as snapshot `codex-security-snapshot/v1:sha256:faf05824fcff564768c19bcc5975fcbfa7e15bb6e79856168075ba65719cfcc6`. Review ID `be401ed4-407d-47f5-9635-0aad432d33b4` is retained so later verification can be compared with the exact pre-remediation state.
 
@@ -13,7 +13,7 @@ The assessed working tree was based on revision `cc43457f53c7785a7316300f0012fa9
 | Review result | Five validated findings: four medium, one low |
 | Remediation | **CLOSED in source** |
 | Post-remediation verification | **PASSED: focused regression suites, full non-evidence suite, typecheck, lint, and independent source review** |
-| Release decision | **READY FOR PUBLIC RELEASE; blocked only on the public CI/release/anonymous-clone gate below** |
+| Release decision | **APPROVED FOR SUBMISSION: source findings closed and public release gates passed** |
 
 The review combined source tracing with focused, isolated reproductions. It did not test an external service or production deployment. The detailed design and acceptance context remain in the [system design specification](SYSTEM_DESIGN_SPEC.md), [requirements trace](REQUIREMENTS.md), [architecture](ARCHITECTURE.md), [QA plan](QA.md), and [release checklist](../CHECKLIST.md).
 
@@ -163,6 +163,6 @@ No finding or gate below is complete merely because a patch exists. The release 
 | Same-session handoff | Manifest-bound successful handoff with durable authorization and completion events, monotonic epochs, fresh passing checkpoint, and at least two inspected captures | **PASSED: same session, epochs 1 -> 3 -> 4, 11 audit events, two captures** |
 | Automated verification | Formatting, lint, typecheck, full tests, evidence validation, dependency audit, secret scan, and offline evaluator path all pass on the final candidate | **PASSED: 226/226 tests, strict evidence valid, both npm audits zero, offline 10/10** |
 | Manual QA | Desktop, mobile, keyboard, accessibility, console, and screenshot review completed against the final candidate | **PASSED: exact-source handoff plus desktop/mobile and 8-unique-image review** |
-| Public release verification | Green CI on the reviewed revision, public release record, visibility check, and anonymous-clone install and verification | **PENDING** |
+| Public release verification | Green CI on the reviewed revision, public release record, visibility check, and anonymous-clone install and verification | **PASSED: PR #1 merged, public CI 33200810272 green, credential-free clone verified** |
 
-The checked-in evidence is the final local v0.2 candidate and passes the strict validator. Follow the [demo and evidence workflow](DEMO.md), [QA plan](QA.md), and [release checklist](../CHECKLIST.md) to reproduce it. Submission remains pending only until the reviewed revision has green public CI, a v0.2.0 release record, and a successful anonymous clean-clone verification.
+The checked-in evidence is the final v0.2 bundle and passes the strict validator. Reviewed candidate `131567b61f86c5ffd83ef839c31764e441bb1073` was merged without squashing through [PR #1](https://github.com/codelit-io/handrail-cua/pull/1) as `175dc614d3d89def523f3ffbc1755748540df127`; [public CI run 33200810272](https://github.com/codelit-io/handrail-cua/actions/runs/33200810272) passed on that merge. A credential-free public clone independently passed dependency installation, Chromium setup, all 226 tests, strict validation of 50 files/13 runs, a new 10/10 zero-model replay smoke, and the expected zero-model `MEMBER_NOT_FOUND` outcome. The [v0.2.0 release](https://github.com/codelit-io/handrail-cua/releases/tag/v0.2.0) is the immutable submission record. Follow the [demo and evidence workflow](DEMO.md), [QA plan](QA.md), and [release checklist](../CHECKLIST.md) to reproduce it.

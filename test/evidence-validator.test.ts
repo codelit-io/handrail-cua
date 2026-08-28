@@ -19,6 +19,7 @@ import { afterEach, describe, it } from "node:test";
 import {
   assertAssignmentOutputContract,
   assertProjectedSuccessOutputs,
+  findSensitiveEvidencePatterns,
   sourceTreeSha256AtRevision,
   validateEvidenceBundle,
 } from "../scripts/validate-evidence.js";
@@ -279,6 +280,30 @@ afterEach(async () => {
 });
 
 describe("strict screenshot evidence validation", () => {
+  it("scans structured string values without treating numeric geometry as payment data", () => {
+    assert.deepEqual(
+      findSensitiveEvidencePatterns(
+        "artifact.json",
+        JSON.stringify({ region: { x: 0.3540283203125 }, label: "synthetic target" }),
+      ),
+      [],
+    );
+    assert.deepEqual(
+      findSensitiveEvidencePatterns(
+        "artifact.json",
+        JSON.stringify({ label: "synthetic", leakedValue: "4242 4242 4242 4242" }),
+      ),
+      [{ kind: "pii", pattern: "payment-card", count: 1 }],
+    );
+    assert.deepEqual(
+      findSensitiveEvidencePatterns(
+        "artifact.json",
+        JSON.stringify({ leakedNumericValue: 4242424242424242 }),
+      ),
+      [{ kind: "pii", pattern: "payment-card", count: 1 }],
+    );
+  });
+
   it("accepts only the assignment output projection and declared outcome predicate", async () => {
     const manifest = await readJson<MutableManifest>(path.resolve("evidence/manifest.json"));
     const artifact = CapabilityArtifactSchema.parse(
@@ -568,7 +593,10 @@ describe("strict screenshot evidence validation", () => {
     handoffRun.eventsSha256 = digest(await readFile(eventsPath));
     await writeJson(manifestPath, manifest);
 
-    await assert.rejects(validateEvidenceBundle(root), /count or session binding is inconsistent/u);
+    await assert.rejects(
+      validateEvidenceBundle(root),
+      /conflicting session or artifact identity|count or session binding is inconsistent/u,
+    );
   });
 
   it("rejects handoff capture events rebound away from their screenshot evidence", async () => {
@@ -860,7 +888,7 @@ describe("strict screenshot evidence validation", () => {
     const root = await clonedEvidence();
     const manifestPath = path.join(root, "manifest.json");
     const manifest = await readJson<MutableManifest>(manifestPath);
-    const replay = manifest.runs.find((run) => run.scenario === "success");
+    const replay = manifest.runs.find((run) => run.kind === "replay" && run.scenario === "success");
     if (!replay) throw new Error("Fixture has no successful replay.");
     await updateRunSummary(root, replay, (summary) => {
       if (!summary.result?.meta) throw new Error("Replay fixture has no result metadata.");
@@ -1205,7 +1233,7 @@ describe("strict screenshot evidence validation", () => {
     const renamedSource = renamedManifest.runs[0]?.screenshots[0]?.relativePath;
     if (!renamedSource) throw new Error("Fixture has no screenshot.");
     await copyFile(path.join(renamedRoot, renamedSource), path.join(renamedRoot, "hidden.bin"));
-    await assert.rejects(validateEvidenceBundle(renamedRoot), /unreferenced PNG screenshot/u);
+    await assert.rejects(validateEvidenceBundle(renamedRoot), /unsupported file type hidden\.bin/u);
 
     const linkedRoot = await clonedEvidence();
     const linkedManifest = await readJson<MutableManifest>(path.join(linkedRoot, "manifest.json"));

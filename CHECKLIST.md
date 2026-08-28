@@ -116,11 +116,11 @@ This is the release ledger. A checked item means the stated phase produced trace
 - [x] Correct model-data, operator-capability, audit durability, override, malformed-input, and evidence-boundary claims across evaluator documentation.
 - [x] Complete the immutable repository security review and close all five validated source findings with focused regressions and independent bypass review.
 - [x] Preserve exactly seven required H2 headings in `REPORT.md` and validate all relative Markdown links.
-- [ ] Commit the final hardened source revision before generating revision-bound evidence.
-- [ ] Generate and validate a fresh live manifest v1.2 bundle from that exact revision.
-- [ ] Complete and attach a same-session handoff run with at least two manifest-bound captures.
-- [ ] Re-run desktop, mobile, keyboard, accessibility, console, and screenshot manual QA against the final candidate.
-- [ ] Run lint, typecheck, full tests, evidence validation, dependency/secret scans, and the offline evaluator path.
+- [x] Commit the final hardened source revision before generating revision-bound evidence (`8d3029388b7dc83d71449075dca42f285e143aaf`).
+- [x] Generate and validate a fresh live manifest v1.2 bundle from that exact revision: 50 files, 13 runs, live native Ollama discovery, and artifact digest `4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11`.
+- [x] Complete and attach a same-session handoff run with two distinct manifest-bound captures, epochs 1 -> 3 -> 4, 11 operator audit events, a fresh passing checkpoint, and zero model calls.
+- [x] Re-run desktop handoff against the exact source; re-inspect the source-unchanged 1440 x 900 and 390 x 844 references, keyboard/accessibility behavior, console listeners, and all 8 unique release images.
+- [x] Run lint, typecheck, 226/226 tests, strict evidence validation, both zero-vulnerability dependency audits, targeted tracked-file hygiene checks, and a fresh 10/10 offline evaluator path.
 - [ ] Push the reviewed public revision, wait for green CI, and publish the v0.2.0 release record.
 - [ ] Clone the public revision anonymously and repeat installation, verification, evidence validation, and the offline demo.
 

@@ -31,6 +31,7 @@ import {
   INTERNAL_REDACTION,
   PII_REDACTION,
   SECRET_REDACTION,
+  type SensitivePatternFinding,
 } from "../src/runtime/redaction.js";
 
 const RelativePathSchema = z
@@ -1983,17 +1984,86 @@ async function validateRunScreenshots(
   return [...manifestRefs.keys()];
 }
 
+function withoutRedactionMarkers(value: string): string {
+  return value
+    .replaceAll(SECRET_REDACTION, "")
+    .replaceAll(PII_REDACTION, "")
+    .replaceAll(INTERNAL_REDACTION, "");
+}
+
+function structuredStringValues(value: unknown, strings: string[]): void {
+  if (typeof value === "string") {
+    strings.push(value);
+    return;
+  }
+  if (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    Math.abs(value) >= 1_000_000_000_000
+  ) {
+    strings.push(String(value));
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) structuredStringValues(item, strings);
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const item of Object.values(value)) structuredStringValues(item, strings);
+  }
+}
+
+function aggregateSensitivePatterns(values: readonly string[]): SensitivePatternFinding[] {
+  const totals = new Map<string, SensitivePatternFinding>();
+  for (const value of values) {
+    for (const finding of findSensitivePatterns(withoutRedactionMarkers(value))) {
+      const key = `${finding.kind}:${finding.pattern}`;
+      const current = totals.get(key);
+      totals.set(key, {
+        kind: finding.kind,
+        pattern: finding.pattern,
+        count: (current?.count ?? 0) + finding.count,
+      });
+    }
+  }
+  return [...totals.values()];
+}
+
+/**
+ * Scan human-authored text as a document, but scan JSON evidence by string value.
+ * Decimal JSON fields are typed geometry rather than human text; treating a long
+ * fractional coordinate as a payment-card candidate creates a cross-type false positive.
+ * Large safe integers remain scanned so numeric card-shaped values still fail closed.
+ */
+export function findSensitiveEvidencePatterns(
+  relativePath: string,
+  text: string,
+): SensitivePatternFinding[] {
+  const extension = path.posix.extname(relativePath).toLowerCase();
+  if (extension !== ".json" && extension !== ".jsonl") {
+    return findSensitivePatterns(withoutRedactionMarkers(text));
+  }
+
+  const documents =
+    extension === ".json"
+      ? [JSON.parse(text) as unknown]
+      : text
+          .split(/\r?\n/u)
+          .filter((line) => line.trim().length > 0)
+          .map((line) => JSON.parse(line) as unknown);
+  const strings: string[] = [];
+  for (const document of documents) structuredStringValues(document, strings);
+  return aggregateSensitivePatterns(strings);
+}
+
 async function validateNoSensitiveText(root: string, files: readonly string[]): Promise<void> {
   for (const relative of files) {
     if (FORBIDDEN_FILE.test(relative)) {
       throw new Error(`Forbidden raw evidence file ${relative}.`);
     }
     if (!TEXT_FILE.test(relative)) continue;
-    const text = (await readFile(inside(root, relative), "utf8"))
-      .replaceAll("[REDACTED:SECRET]", "")
-      .replaceAll("[REDACTED:PII]", "")
-      .replaceAll("[REDACTED:INTERNAL]", "");
-    const findings = findSensitivePatterns(text);
+    const text = await readFile(inside(root, relative), "utf8");
+    const findings = findSensitiveEvidencePatterns(relative, text);
     if (findings.length > 0) {
       throw new Error(
         `Sensitive text pattern detected in ${relative}: ${findings.map((item) => item.pattern).join(", ")}.`,

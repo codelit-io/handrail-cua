@@ -67,6 +67,8 @@ Core modules never import Playwright Page or Locator. BrowserSurface owns frames
 7. Compile only successful, postcondition-verified actions against current semantic element references. The artifact retains durable semantic, contextual, frame, or visual anchors, never element handles or raw coordinates.
 8. Finish only after the declared output and global checkpoint validate. Lint, digest, and save the artifact as draft.
 
+The runtime replaces any planner-supplied decision label with a monotonic run-local audit ID after validation. A repeated or adversarial model label therefore cannot merge two decisions or detach one from the fresh observation that authorized it.
+
 Persistent audit events retain decision kinds, current observation and element references, structural observation metadata, and action receipts. They deliberately omit page text, planner rationales, free-form intervention state, hidden chain-of-thought, and raw provider transcripts.
 
 ## Capability artifact
@@ -167,6 +169,8 @@ stateDiagram-v2
 ```
 
 Automation quiesces at an action boundary, records its last receipt, and atomically increments the lease epoch. A random bearer capability gates the intervention routes; it is exchanged from the URL fragment into a scoped cookie, remains reusable for that intervention, and is separate from the operator's short-lived epoch claim. The operator uses the console to click coordinates, type into the focused control, press keys, or capture evidence on the same Playwright Page. Generic click, type, and key actions are `commit`; only capture is `read`. An admitted action drains and returns its receipt before an elapsed TTL moves the coordinator back to awaiting operator, avoiding a mutate-then-report-failure ambiguity. Evaluator entrypoints persist redacted authorization intent before dispatch and completion after success; a configured audit/capture sink failure fails the lease and blocks resume. The embeddable server has only in-memory audit if a caller omits those sinks. Bounded polling recovers one-off observation failures without issuing new authority. Resume atomically releases human ownership; automation reacquires only after a fresh observation and either advances when the human satisfied the current postcondition or safely retries the current idempotent step.
+
+Replay timeout accounting uses a monotonic active-automation clock. The explicit operator-owned callback interval is excluded, while time before handoff and after resume remains in budget; total result duration still includes the complete wall-clock interval.
 
 A stale epoch, token, or duplicate claimant is rejected as CONTROL_LOST. Lease expiry returns to awaiting operator; it never silently gives automation control. Local process death loses the live session and is reported honestly as SESSION_LOST.
 

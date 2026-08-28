@@ -12,7 +12,17 @@ This is the evaluator index for sanitized release evidence. Every visible record
 | Expected exception | At least one exceptional replay that preserves `business_outcome / MEMBER_NOT_FOUND` and records zero model calls. |
 | Same-session handoff | At least one successful handoff replay whose result, original/resumed session ID, monotonic ownership epochs, pre-dispatch authorizations, completed operator actions, fresh resume checkpoint, and capture hashes agree across the summary, events, and manifest. |
 
-Exact run IDs, model-call count, artifact/model digests, replay count, latency, file count, and screenshot count are read directly from the validated bundle. They are intentionally not copied here, which prevents this index from becoming stale when the immutable evidence bundle is regenerated.
+## Validated v0.2.0 snapshot
+
+- Source revision: `8d3029388b7dc83d71449075dca42f285e143aaf`
+- Live planner: native Ollama `qwen3:4b`, digest `359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7`, semantic-only input, four observation-bound decisions
+- Capability: `member.balance.lookup` revision 1, digest `4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11`, separately reviewed and approved after discovery
+- Deterministic proof: 10/10 successful fresh-session replays, zero replay model calls, mean 2,112.7 ms, p95 2,222 ms
+- Exception proof: `business_outcome / MEMBER_NOT_FOUND`, zero model calls
+- Handoff proof: one unchanged surface session, ownership epochs 1 -> 3 -> 4, 11 operator audit events, two operator captures, passing fresh resume checkpoint, and zero model calls
+- Bundle inventory: manifest v1.2, 50 files, 13 runs, 18 referenced PNGs, and 8 unique images
+
+These values are also machine-derived from [the manifest](manifest.json), [the stability report](stability.json), and the manifest-bound run records. Regenerate the bundle rather than editing them independently.
 
 ## Evidence boundary
 
@@ -20,7 +30,7 @@ The manifest inventories every retained run summary, redacted JSONL event log, a
 
 The bundle excludes raw prompts, model responses, request bodies, browser storage, cookies, URL-fragment capabilities, ownership claims, credentials, and real PII. Redacted JSONL retains structural observation metadata, decision/action kinds, safe reason codes, and action receipts; it omits page text, planner rationale, typed values, and other free-form surface/model text. Retained browser screenshots are allowed only for the conspicuously labeled synthetic fixture and still require manual pixel review.
 
-The handoff record is part of manifest v1.2 rather than a separate narrative claim. Evaluator entrypoints persist an authorization-intent event before each operator surface action and a completion event afterward. If a configured audit or capture sink fails, the control lease fails and resume is blocked. The bearer capability remains reusable for the intervention lifetime but is retained only as a server-side digest and is never release evidence.
+The handoff record is part of manifest v1.2 rather than a separate narrative claim. Evaluator entrypoints persist an authorization-intent event before each operator surface action and a completion event afterward. If a configured audit or capture sink fails, the control lease fails and resume is blocked. The URL-fragment capability remains reusable for the intervention lifetime but is retained only as a server-side digest and is never release evidence.
 
 ## Reproduce
 

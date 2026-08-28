@@ -13,7 +13,7 @@ The assessed working tree was based on revision `cc43457f53c7785a7316300f0012fa9
 | Review result | Five validated findings: four medium, one low |
 | Remediation | **CLOSED in source** |
 | Post-remediation verification | **PASSED: focused regression suites, full non-evidence suite, typecheck, lint, and independent source review** |
-| Release decision | **BLOCKED only on final evidence, manual QA, and public-release gates below** |
+| Release decision | **READY FOR PUBLIC RELEASE; blocked only on the public CI/release/anonymous-clone gate below** |
 
 The review combined source tracing with focused, isolated reproductions. It did not test an external service or production deployment. The detailed design and acceptance context remain in the [system design specification](SYSTEM_DESIGN_SPEC.md), [requirements trace](REQUIREMENTS.md), [architecture](ARCHITECTURE.md), [QA plan](QA.md), and [release checklist](../CHECKLIST.md).
 
@@ -157,12 +157,12 @@ No finding or gate below is complete merely because a patch exists. The release 
 | --- | --- | --- |
 | Findings remediated | Reviewed source changes and the finding-specific negative and positive regression tests above | **PASSED** |
 | Post-remediation source review | Independent bypass review plus lint, typecheck, and the 85-test focused runtime/hardening batch | **PASSED** |
-| Immutable source basis | Final hardened source committed with a clean `src/` tree before release evidence generation | **PENDING** |
-| Qualifying release bundle | Fresh live manifest v1.2 bound to the committed source, bundled target, native Ollama transport and stable model digest, with semantic-only model input | **PENDING** |
-| Artifact and replay integrity | Separate current approval bound to the exact artifact plus at least ten fresh-session successful zero-model replays and the declared business outcome | **PENDING** |
-| Same-session handoff | Manifest-bound successful handoff with durable authorization and completion events, monotonic epochs, fresh passing checkpoint, and at least two inspected captures | **PENDING** |
-| Automated verification | Formatting, lint, typecheck, full tests, evidence validation, dependency audit, secret scan, and offline evaluator path all pass on the final candidate | **PENDING** |
-| Manual QA | Desktop, mobile, keyboard, accessibility, console, and screenshot review completed against the final candidate | **PENDING** |
+| Immutable source basis | Final hardened source committed with a clean `src/` tree before release evidence generation | **PASSED: `8d3029388b7dc83d71449075dca42f285e143aaf`** |
+| Qualifying release bundle | Fresh live manifest v1.2 bound to the committed source, bundled target, native Ollama transport and stable model digest, with semantic-only model input | **PASSED: 50 files, 13 runs, native `qwen3:4b` digest bound** |
+| Artifact and replay integrity | Separate current approval bound to the exact artifact plus at least ten fresh-session successful zero-model replays and the declared business outcome | **PASSED: 10/10 success plus `MEMBER_NOT_FOUND`, zero replay model calls** |
+| Same-session handoff | Manifest-bound successful handoff with durable authorization and completion events, monotonic epochs, fresh passing checkpoint, and at least two inspected captures | **PASSED: same session, epochs 1 -> 3 -> 4, 11 audit events, two captures** |
+| Automated verification | Formatting, lint, typecheck, full tests, evidence validation, dependency audit, secret scan, and offline evaluator path all pass on the final candidate | **PASSED: 226/226 tests, strict evidence valid, both npm audits zero, offline 10/10** |
+| Manual QA | Desktop, mobile, keyboard, accessibility, console, and screenshot review completed against the final candidate | **PASSED: exact-source handoff plus desktop/mobile and 8-unique-image review** |
 | Public release verification | Green CI on the reviewed revision, public release record, visibility check, and anonymous-clone install and verification | **PENDING** |
 
-The checked-in evidence at the time of this snapshot is not final v0.2 closure evidence. Follow the [demo and evidence workflow](DEMO.md), [QA plan](QA.md), and [release checklist](../CHECKLIST.md) after remediation. Submission remains blocked until every status above is complete and independently reviewable.
+The checked-in evidence is the final local v0.2 candidate and passes the strict validator. Follow the [demo and evidence workflow](DEMO.md), [QA plan](QA.md), and [release checklist](../CHECKLIST.md) to reproduce it. Submission remains pending only until the reviewed revision has green public CI, a v0.2.0 release record, and a successful anonymous clean-clone verification.

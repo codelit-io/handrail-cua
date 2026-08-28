@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0.0",
   "artifactId": "member.balance.lookup",
-  "artifactDigest": "d06ba78e8be50f9ff23bf0a5bb51ae5c05a043c9cb66bf85b4ac0c38bbc3da64",
+  "artifactDigest": "4b2635ee63206087a393fd94d916d60322206db3ac350b72a1fcff2849ea3c11",
   "requestedRuns": 10,
   "completedRuns": 10,
   "succeeded": 10,
@@ -9,71 +9,71 @@
   "allZeroModelCalls": true,
   "totalModelCalls": 0,
   "latencyMs": {
-    "min": 1931,
-    "max": 2028,
-    "mean": 1967.4,
-    "p50": 1966,
-    "p95": 2028
+    "min": 2065,
+    "max": 2222,
+    "mean": 2112.7,
+    "p50": 2083,
+    "p95": 2222
   },
   "runs": [
     {
-      "runId": "submission-live-qwen3-4b-replay-success-01",
+      "runId": "release-live-8d30293-replay-success-01",
       "status": "succeeded",
-      "durationMs": 2028,
+      "durationMs": 2222,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-02",
+      "runId": "release-live-8d30293-replay-success-02",
       "status": "succeeded",
-      "durationMs": 1990,
+      "durationMs": 2133,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-03",
+      "runId": "release-live-8d30293-replay-success-03",
       "status": "succeeded",
-      "durationMs": 1991,
+      "durationMs": 2114,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-04",
+      "runId": "release-live-8d30293-replay-success-04",
       "status": "succeeded",
-      "durationMs": 1944,
+      "durationMs": 2068,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-05",
+      "runId": "release-live-8d30293-replay-success-05",
       "status": "succeeded",
-      "durationMs": 1966,
+      "durationMs": 2066,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-06",
+      "runId": "release-live-8d30293-replay-success-06",
       "status": "succeeded",
-      "durationMs": 1985,
+      "durationMs": 2101,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-07",
+      "runId": "release-live-8d30293-replay-success-07",
       "status": "succeeded",
-      "durationMs": 1972,
+      "durationMs": 2083,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-08",
+      "runId": "release-live-8d30293-replay-success-08",
       "status": "succeeded",
-      "durationMs": 1935,
+      "durationMs": 2065,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-09",
+      "runId": "release-live-8d30293-replay-success-09",
       "status": "succeeded",
-      "durationMs": 1931,
+      "durationMs": 2200,
       "modelCalls": 0
     },
     {
-      "runId": "submission-live-qwen3-4b-replay-success-10",
+      "runId": "release-live-8d30293-replay-success-10",
       "status": "succeeded",
-      "durationMs": 1932,
+      "durationMs": 2075,
       "modelCalls": 0
     }
   ]

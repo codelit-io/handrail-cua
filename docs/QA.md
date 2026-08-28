@@ -24,6 +24,8 @@ npm run demo:offline -- --replays 10 --output <fresh-directory>
 credential-free clone -> install -> verify -> offline demo
 ```
 
+Final candidate record: source revision `8d3029388b7dc83d71449075dca42f285e143aaf` produced the checked-in live manifest v1.2 bundle. It contains 50 files and 13 runs: one four-decision native Ollama discovery, 10/10 successful fresh-session zero-model replays, one zero-model `MEMBER_NOT_FOUND` outcome, and one zero-model same-session handoff. Replay latency was 2,112.7 ms mean and 2,222 ms p95. The 18 referenced PNGs reduce to 8 unique images; every unique image received a manual pixel review.
+
 The checked-in release bundle is separate from the offline smoke. For a v0.2.0 release, manifest v1.2 must bind a genuine native Ollama discovery, strict artifact approval, at least ten fresh-session zero-model replays of the exact compiled digest, an exceptional `business_outcome / MEMBER_NOT_FOUND` replay, and a successfully resumed same-session handoff. `npm run evidence:validate` is the authoritative completion signal.
 
 | Area | Automated coverage | Current boundary |
@@ -76,18 +78,20 @@ npm run evidence:validate
 
 The final candidate pass must exercise the target and operator console at a 1440 x 900 desktop viewport and a 390 x 844 mobile viewport. The operator restores the expired page, captures evidence, uses the retained live session, returns control, and completes the lookup. The Playwright surface session ID must remain identical before handoff, during human ownership, and after resumed completion. Checkmarks are applied only after the final candidate is exercised:
 
-- [ ] Confirm the synthetic-data banner remains visible throughout target states.
-- [ ] Complete known-member lookups and verify the declared typed Savings outputs.
-- [ ] Confirm live discovery and replay use different browser session IDs.
-- [ ] Confirm every replay summary records `modelCalls: 0`.
-- [ ] Trigger session expiry and retain one stable surface session through handoff and resume.
-- [ ] Verify prior automation grants and stale operator claims are rejected by focused tests.
-- [ ] Use live-session click and evidence capture; cover focused typing and an allowlisted key in manual or automated QA.
-- [ ] Confirm typed content, capability values, and claim tokens are absent from the operator audit log.
-- [ ] Confirm resume performs a fresh observation and checkpoint before issuing the new automation grant.
-- [ ] Inspect desktop and mobile; controls remain reachable and the app shell does not horizontally overflow.
-- [ ] Confirm target and operator console/page-error listeners are clean.
-- [ ] Confirm target, Ollama, and operator endpoints remain local or explicitly authorized.
+- [x] Confirm the synthetic-data banner remains visible throughout target states.
+- [x] Complete known-member lookups and verify the declared typed Savings outputs.
+- [x] Confirm live discovery and replay use different browser session IDs.
+- [x] Confirm every replay summary records `modelCalls: 0`.
+- [x] Trigger session expiry and retain one stable surface session through handoff and resume.
+- [x] Verify prior automation grants and stale operator claims are rejected by focused tests.
+- [x] Use live-session click and evidence capture; cover focused typing and an allowlisted key in manual or automated QA.
+- [x] Confirm typed content, capability values, and claim tokens are absent from the operator audit log.
+- [x] Confirm resume performs a fresh observation and checkpoint before issuing the new automation grant.
+- [x] Inspect desktop and mobile; controls remain reachable and the app shell does not horizontally overflow.
+- [x] Confirm target and operator console/page-error listeners are clean.
+- [x] Confirm target, Ollama, and operator endpoints remain local or explicitly authorized.
+
+The exact-source desktop handoff was completed manually through the standalone operator console. The accepted 1440 x 900 desktop and 390 x 844 mobile references were re-inspected after the final source run; the intervening source changes affect discovery decision binding and replay time accounting, not operator markup or styling. Real-Chromium E2E additionally re-exercised same-session recovery, keyboard/action authorization, page-error listeners, and responsive control behavior.
 
 ## Visual fidelity and accessibility ledger
 
@@ -113,15 +117,17 @@ Chromium is the sole qualified automation browser for this assignment. The opera
 
 Before the final release, rerun and check each item against the release commit:
 
-- [ ] `npm audit --omit=dev` and full `npm audit` report zero known vulnerabilities.
-- [ ] Scan source and evidence for API keys, bearer tokens, cookies, browser state, private URLs, home-directory paths, email addresses, and non-synthetic identifiers.
-- [ ] Prove with non-pattern canaries that structured evidence omits raw observation text, planner rationale, receipt text, intervention state, and fault observations while classification-redacting declared PII and secret outputs.
-- [ ] Run the strict evidence validator and independently review every unique evidence screenshot; record duplicate-image findings from the final bundle rather than assuming a count.
-- [ ] Confirm `.env`, temporary runs, browser profiles, coverage, traces, videos, and raw provider files are ignored.
-- [ ] Confirm every GitHub Action is pinned to a verified immutable commit SHA and workflow permissions are only `contents: read`.
-- [ ] Confirm CI uses `npm ci`, installs only Chromium and required system dependencies, and runs `npm run verify`.
-- [ ] Review the release tree for generated files, large binaries, absolute paths, and accidental provider transcripts.
-- [ ] Confirm `private: true` prevents accidental npm publication; no open-source license is asserted for this evaluation repository.
+- [x] `npm audit --omit=dev` and full `npm audit` report zero known vulnerabilities.
+- [x] Scan source and evidence for API keys, capability values, cookies, browser state, private URLs, home-directory paths, email addresses, and non-synthetic identifiers.
+- [x] Prove with non-pattern canaries that structured evidence omits raw observation text, planner rationale, receipt text, intervention state, and fault observations while classification-redacting declared PII and secret outputs.
+- [x] Run the strict evidence validator and independently review every unique evidence screenshot; record duplicate-image findings from the final bundle rather than assuming a count.
+- [x] Confirm `.env`, temporary runs, browser profiles, coverage, traces, videos, and raw provider files are ignored.
+- [x] Confirm every GitHub Action is pinned to a verified immutable commit SHA and workflow permissions are only `contents: read`.
+- [x] Confirm CI uses `npm ci`, installs only Chromium and required system dependencies, and runs `npm run verify`.
+- [x] Review the release tree for generated files, large binaries, absolute paths, and accidental provider transcripts.
+- [x] Confirm `private: true` prevents accidental npm publication; no open-source license is asserted for this evaluation repository.
+
+The final local hygiene pass used the evidence contract, targeted tracked-file pattern checks, dependency metadata, workflow review, and repository inventory. It found no credential-shaped value, live capability, user home path, unexpected large file, or provider transcript in the release tree; both npm audit modes reported zero vulnerabilities.
 
 ## Evaluator-friendly evidence manifest
 

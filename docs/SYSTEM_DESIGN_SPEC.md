@@ -164,6 +164,8 @@ sessionId?, artifactId?, actor, ownerEpoch, type, ...projected fields
 
 The writer owns contiguous sequence assignment. The validator checks unique event IDs, run identity, expected start and terminal events, model-decision counts, and zero-model replay. Free-form page text, planner rationale, typed values, and raw receipt messages are excluded. Fixed `reasonCode`, fault code, phase, step, effect, and safe expected/observed categories retain the useful "what and why."
 
+Planner responses may contain descriptive labels, but they do not control audit identity. The discovery runtime assigns every accepted model decision a monotonic, run-local identifier (`decision-0001`, `decision-0002`, and so on) and binds it to the exact fresh observation used for that call. This prevents a weak or adversarial model from reusing an identifier and collapsing otherwise distinct evidence events.
+
 ## 6. Execution design
 
 ### 6.1 Discovery sequence
@@ -196,6 +198,8 @@ Discovery preflight rejects target overrides. An activation is offered to the mo
 
 Each planner hashes the exact UTF-8 JSON string it sends, including fixed instructions, dynamic semantic projection, structured-output schema, model/options, and any opt-in screenshot. The response carries that call's request hash; discovery assembles only its own ordered hashes into `provenance.promptHash`. This remains correct when one planner instance serves interleaved runs and does not persist raw prompts or responses.
 
+The runtime, not the planner, assigns the persisted decision ID after schema validation. Each decision is therefore uniquely traceable to one current observation even when a local model repeats its own optional label.
+
 ### 6.2 Replay sequence
 
 1. Parse artifact, recompute digest, and validate the required artifact approval, binding, reviewed overrides, typed inputs, and policy. The exported engine defaults to strict; lower-level discovery/test composition must explicitly select non-strict.
@@ -204,6 +208,8 @@ Each planner hashes the exact UTF-8 JSON string it sends, including fixed instru
 4. For each step: resolve exactly one target, authorize the exact command/effect/operation, dispatch, inspect global sentinels, and verify the step postcondition.
 5. Validate outputs and the compound terminal predicate.
 6. Return a typed result with `modelCalls: 0` and close or deliberately retain the session.
+
+Replay enforces its wall-clock budget with a monotonic clock. Time spent inside the explicit `onIntervention` operator callback is excluded from the active automation budget because automation has relinquished ownership; all pre-handoff and post-resume automation time remains bounded. Result metadata still reports total elapsed wall duration, including the human-owned pause, so the audit record remains honest about end-to-end latency.
 
 ### 6.3 Handoff state machine
 
@@ -223,6 +229,8 @@ stateDiagram-v2
 The old automation grant must be invalid before operator action. The assigned operator first presents a random bearer capability from the URL fragment; the browser exchanges it for a path-scoped `HttpOnly`, `SameSite=Strict` cookie and clears the fragment. That capability is reusable for the intervention lifetime, so it must remain private and is not a substitute for operator identity. The operator then holds a separate short-lived claim bound to the current owner epoch.
 
 Each click, type, key, and capture is serialized, observes the current URL, passes the operator policy hook, and records an authorization-intent audit event before reaching `SurfaceAdapter`; the adapter rechecks the expected URL at dispatch. Generic click, type, and key operations are conservatively `commit` because focus/blur handlers can persist data; capture alone is `read`. An action admitted under a valid lease drains and returns its receipt even if the TTL expires during the operation, after which the coordinator transitions to awaiting operator. It never mutates and then retroactively reports that the action did not happen. A completion event follows a successful action. The evaluator CLI supplies durable audit and capture sinks. If a configured sink fails before dispatch, the claim is stopped without acting; if completion persistence fails after a side effect, the lease is failed and resume is blocked because the physical action cannot be rolled back. The embeddable server retains only in-memory audit when no sink is supplied, so production callers must require durable sinks. Resume must return the same session ID, a newer automation epoch, a fresh observation ID, and a passing recovery checkpoint. Bounded state polling retries transient observation failure without granting new authority; repeated failure closes the intervention.
+
+The operator interval does not consume the replay engine's active-automation timeout. This exception begins only when control has formally transferred into the intervention callback and ends when that callback settles; it cannot hide slow automation before pause or after resume. Total run duration continues to include the operator interval.
 
 ## 7. Safety design
 
@@ -325,6 +333,8 @@ The implemented target is Chromium only; the geometric visual fallback is derive
 | ADR-08 | Local Ollama evidence path | Genuine LLM discovery without external data egress | Evaluator needs local model for reproduction |
 | ADR-09 | Projected audit log | Keeps structural causality without raw regulated text | Debug detail uses safe categories, screenshots only when verified |
 | ADR-10 | Synthetic hostile target | Safe, deterministic, and exercises frames/tables/errors | No claim of production bank certification |
+| ADR-11 | Runtime-owned decision identities | Model-generated labels are not trustworthy audit keys | Every accepted decision is uniquely bound to one fresh observation |
+| ADR-12 | Active-automation timeout | A deliberate human pause is not automation execution time | Automation remains bounded while total wall duration remains observable |
 
 ## 13. Execution integrity
 

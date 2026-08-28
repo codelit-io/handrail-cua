@@ -1,50 +1,70 @@
 {
-  "schemaVersion": "1.1.0",
-  "generatedAt": "2026-08-28T03:03:21.320Z",
+  "schemaVersion": "1.2.0",
+  "generatedAt": "2026-08-28T18:02:30.845Z",
   "mode": "live",
   "model": {
     "provider": "ollama-local",
     "modelId": "qwen3:4b",
     "liveModel": true,
-    "digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7"
+    "digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7",
+    "transport": "native-ollama"
+  },
+  "provenance": {
+    "sourceRevision": "8d3029388b7dc83d71449075dca42f285e143aaf",
+    "sourceTreeSha256": "62fe490d8ae41dd98df9341a7569bffa7513da03883c3863b768aa37fe42bfce",
+    "targetFixtureSha256": "4f26de26cd08b12636b6441e106a0d47c77f6b1ff7bb9175f8c53b75f332582a",
+    "nodeVersion": "v26.5.0",
+    "playwrightVersion": "1.62.1",
+    "invocation": {
+      "command": "demo:live",
+      "planner": "live",
+      "replayRuns": 10,
+      "screenshotModelInput": false,
+      "targetSource": "bundled-fixture",
+      "syntheticTarget": true
+    }
   },
   "artifact": "artifacts/member.balance.lookup.v1.json",
-  "artifactSha256": "4c57584ed1ae1bdeb15533d573db027653efb7202deb9c2501d25fc157c2328f",
+  "artifactSha256": "8719cc2d6cf45e8ba2d155a8589d359f83d09cdc211da9249d99eabfeb973337",
+  "artifactApproval": "artifacts/member.balance.lookup.v1.approval.json",
+  "artifactApprovalSha256": "f05f62b216e6f8bcc48ef764444e56f75badbb9a0edc4da3c3555a751dba8b22",
   "stability": {
     "path": "stability.json",
-    "sha256": "b0c191443df6e4864179f3fa1dceac0ed36665004d944827211a635e91335e82"
+    "sha256": "1e5462402ebb9cf456b95b2191985fb3d4c1423634a3ccc51d2bccdca2303dc6"
   },
   "runs": [
     {
-      "id": "submission-live-qwen3-4b-discovery",
+      "id": "release-live-8d30293-discovery",
       "kind": "discovery",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-discovery",
-      "summary": "runs/submission-live-qwen3-4b-discovery/summary.json",
-      "summarySha256": "39511c7e291db6d2952c5b3ed412e7effe4a5c39fb7aef47217bfb580767cd76",
-      "events": "runs/submission-live-qwen3-4b-discovery/events.redacted.jsonl",
-      "eventsSha256": "f48edbce8847b707e5786812b2e7eed79b17031e5af55ad67b39926466172d5b",
+      "directory": "runs/release-live-8d30293-discovery",
+      "summary": "runs/release-live-8d30293-discovery/summary.json",
+      "summarySha256": "00433a6390745bbee450ce650f367109b42aa6139ce9a5290e0137d67e55dae6",
+      "events": "runs/release-live-8d30293-discovery/events.redacted.jsonl",
+      "eventsSha256": "8f2cda0f840cea7f99c8100e34bddfd3b8ffc69603d024d2072d0b6d423a6b1a",
+      "artifact": "runs/release-live-8d30293-discovery/artifact.json",
+      "artifactSha256": "8719cc2d6cf45e8ba2d155a8589d359f83d09cdc211da9249d99eabfeb973337",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-discovery/screenshots/002-observation-79921cb4-2d4b-4d65-befa-89153f99ff5c.png",
+          "relativePath": "runs/release-live-8d30293-discovery/screenshots/002-observation-c8eab6fd-6d7b-4603-a153-f344da691a67.png",
           "sha256": "23731926f19eb0fe441c901d3e7e5ec59d14643f2810a418df7362f3bde245d1",
           "byteLength": 55071,
           "mimeType": "image/png"
         },
         {
-          "relativePath": "runs/submission-live-qwen3-4b-discovery/screenshots/005-observation-3c90ccde-d185-4fa3-b585-351423d00f48.png",
+          "relativePath": "runs/release-live-8d30293-discovery/screenshots/005-observation-2b2fb228-a96d-4678-b644-a34706412417.png",
           "sha256": "a92ae318ba9e7b5d0392025ef3e465f0280139252d25246547656ff8891968a6",
           "byteLength": 55776,
           "mimeType": "image/png"
         },
         {
-          "relativePath": "runs/submission-live-qwen3-4b-discovery/screenshots/009-observation-e4fac4ba-2038-473c-87fc-7be5a93aa34d.png",
+          "relativePath": "runs/release-live-8d30293-discovery/screenshots/009-observation-3320975f-6c94-4bf2-83d1-df2f789f5d1c.png",
           "sha256": "cdb884a7cfc5e1a2cb1543d948890e1b3c19885a31683ddf954198bdd8a9532d",
           "byteLength": 89128,
           "mimeType": "image/png"
         },
         {
-          "relativePath": "runs/submission-live-qwen3-4b-discovery/screenshots/013-observation-d10d7b8b-c526-44ad-8691-31180de1dbd7.png",
+          "relativePath": "runs/release-live-8d30293-discovery/screenshots/013-observation-b7e1620b-c667-484a-94da-53e7143a15dc.png",
           "sha256": "cdb884a7cfc5e1a2cb1543d948890e1b3c19885a31683ddf954198bdd8a9532d",
           "byteLength": 89128,
           "mimeType": "image/png"
@@ -52,17 +72,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-01",
+      "id": "release-live-8d30293-replay-success-01",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-01",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-01/summary.json",
-      "summarySha256": "83914bd11436d0fa60308c18fa9dd3f83a970ebef2ab9910fdfd115bc7df8cb6",
-      "events": "runs/submission-live-qwen3-4b-replay-success-01/events.redacted.jsonl",
-      "eventsSha256": "acef08642f799b29f1ee539d1def61119a9f9d814fe7582408276ab11cb815b7",
+      "directory": "runs/release-live-8d30293-replay-success-01",
+      "summary": "runs/release-live-8d30293-replay-success-01/summary.json",
+      "summarySha256": "b4323c7f3c830d9e190cc886ddf87a18e2b08efd3fbd54868deb998580201aa0",
+      "events": "runs/release-live-8d30293-replay-success-01/events.redacted.jsonl",
+      "eventsSha256": "22f125a817e4ca5807c435d38e9309b7cd25661cd4fc10542efd24031a172ca1",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-01/screenshots/submission-live-qwen3-4b-replay-success-01-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-01/screenshots/release-live-8d30293-replay-success-01-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -70,17 +90,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-02",
+      "id": "release-live-8d30293-replay-success-02",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-02",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-02/summary.json",
-      "summarySha256": "c4a264a10b7c216dbe402210977fea9f6440ece06755d34b2fba16e6d6bdcafa",
-      "events": "runs/submission-live-qwen3-4b-replay-success-02/events.redacted.jsonl",
-      "eventsSha256": "9fc17fc2f5577bef1f4e6a1974334c923c53117cb55a066400d43df55cb8cd45",
+      "directory": "runs/release-live-8d30293-replay-success-02",
+      "summary": "runs/release-live-8d30293-replay-success-02/summary.json",
+      "summarySha256": "544b751bf69dc0898e9d9617a995f95af78e3f47e0adf070a5687624b678d448",
+      "events": "runs/release-live-8d30293-replay-success-02/events.redacted.jsonl",
+      "eventsSha256": "802b6d5b4ad3676422c7a540e56e8843cc5432530a733e451235a212a622a657",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-02/screenshots/submission-live-qwen3-4b-replay-success-02-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-02/screenshots/release-live-8d30293-replay-success-02-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -88,17 +108,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-03",
+      "id": "release-live-8d30293-replay-success-03",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-03",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-03/summary.json",
-      "summarySha256": "3ca9146bc23fdb0eb448c9ecba6b4d9310abfef450f9ff197d1eace91729a066",
-      "events": "runs/submission-live-qwen3-4b-replay-success-03/events.redacted.jsonl",
-      "eventsSha256": "c1ddfb8450b4f730127d6080d3a1333355d90f74aba66c1595c134bb561fe3e0",
+      "directory": "runs/release-live-8d30293-replay-success-03",
+      "summary": "runs/release-live-8d30293-replay-success-03/summary.json",
+      "summarySha256": "710a00f05ad9dc5ad353551a4d2af6ee9203ab4d6582ce2e3fdebe749e8defd1",
+      "events": "runs/release-live-8d30293-replay-success-03/events.redacted.jsonl",
+      "eventsSha256": "2f50ad530d95f201e3aee02852ed460562369259ea8cc47342f0f9508a34e3f6",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-03/screenshots/submission-live-qwen3-4b-replay-success-03-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-03/screenshots/release-live-8d30293-replay-success-03-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -106,17 +126,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-04",
+      "id": "release-live-8d30293-replay-success-04",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-04",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-04/summary.json",
-      "summarySha256": "1065020e34f6b1ac223be1d2f4e950aec86ae598133bdaf2ec8ea2848bb684f2",
-      "events": "runs/submission-live-qwen3-4b-replay-success-04/events.redacted.jsonl",
-      "eventsSha256": "0e3774caa051e96158188e5287cac30157f218db7325c03f4ccaf366dc1e6e68",
+      "directory": "runs/release-live-8d30293-replay-success-04",
+      "summary": "runs/release-live-8d30293-replay-success-04/summary.json",
+      "summarySha256": "05b2cca248d942fae9f1373007e3fee4f5288f3f80c06913cfeb6f61dc65eee5",
+      "events": "runs/release-live-8d30293-replay-success-04/events.redacted.jsonl",
+      "eventsSha256": "9d9d6300c85462abc09aa7864c33ee4fac075e396e1d8576751db13d917531b4",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-04/screenshots/submission-live-qwen3-4b-replay-success-04-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-04/screenshots/release-live-8d30293-replay-success-04-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -124,17 +144,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-05",
+      "id": "release-live-8d30293-replay-success-05",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-05",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-05/summary.json",
-      "summarySha256": "fce51323feb75a1f1c5df8d6f224f925295996e13d441b4874db6f61256d3389",
-      "events": "runs/submission-live-qwen3-4b-replay-success-05/events.redacted.jsonl",
-      "eventsSha256": "ce9c1a91f7289003e652d53f8fa3dad8b756d63c23ebc4ecc72e26940611b1c4",
+      "directory": "runs/release-live-8d30293-replay-success-05",
+      "summary": "runs/release-live-8d30293-replay-success-05/summary.json",
+      "summarySha256": "48f4cf72ed009aaf495d228a03b56cc9c41b8a5fe2815803e4da61caa192ed57",
+      "events": "runs/release-live-8d30293-replay-success-05/events.redacted.jsonl",
+      "eventsSha256": "0c5d8b2acd80f7214b055882a4dc92cd21eb1f61d853fdd2ba8d3e1cbfacdc54",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-05/screenshots/submission-live-qwen3-4b-replay-success-05-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-05/screenshots/release-live-8d30293-replay-success-05-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -142,17 +162,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-06",
+      "id": "release-live-8d30293-replay-success-06",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-06",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-06/summary.json",
-      "summarySha256": "4950419d057446e7d2e2a76afeb202142c4bdb39ed296be9f4b00a56ce01fcce",
-      "events": "runs/submission-live-qwen3-4b-replay-success-06/events.redacted.jsonl",
-      "eventsSha256": "82d673fac1110c5cb469491d02eef38cb9322a780556d1c8f88033a4d2d73188",
+      "directory": "runs/release-live-8d30293-replay-success-06",
+      "summary": "runs/release-live-8d30293-replay-success-06/summary.json",
+      "summarySha256": "7d32640bcd735d92ccf1188c8a4f5b956a81830c652c304abace791c9c62a441",
+      "events": "runs/release-live-8d30293-replay-success-06/events.redacted.jsonl",
+      "eventsSha256": "6f4271b5e6a6bca7c3a494fb7e5440a51b9bedd1888943f984b5aed1a815090b",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-06/screenshots/submission-live-qwen3-4b-replay-success-06-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-06/screenshots/release-live-8d30293-replay-success-06-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -160,17 +180,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-07",
+      "id": "release-live-8d30293-replay-success-07",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-07",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-07/summary.json",
-      "summarySha256": "da6f3684fc7836cbd83de788b65f75c68aa0b003ba495b0f881dcd10765ed546",
-      "events": "runs/submission-live-qwen3-4b-replay-success-07/events.redacted.jsonl",
-      "eventsSha256": "2255f7f0798429d9cffb2690278690065acf9a48efe89a8ccc36077989874b4d",
+      "directory": "runs/release-live-8d30293-replay-success-07",
+      "summary": "runs/release-live-8d30293-replay-success-07/summary.json",
+      "summarySha256": "6e1205338cc1184fa8cc5f7ac4eafac838593b2dbd1f50b9151cdfdb40442495",
+      "events": "runs/release-live-8d30293-replay-success-07/events.redacted.jsonl",
+      "eventsSha256": "d640ff1c2d46eea17b4a541aa324e395062eb009fe6aa4f4053faac3891e12d4",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-07/screenshots/submission-live-qwen3-4b-replay-success-07-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-07/screenshots/release-live-8d30293-replay-success-07-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -178,17 +198,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-08",
+      "id": "release-live-8d30293-replay-success-08",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-08",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-08/summary.json",
-      "summarySha256": "ca8f3455cb20897a4e6fcd673e3ec7c62142c3bcab4e0110320bb2e9bac95b3d",
-      "events": "runs/submission-live-qwen3-4b-replay-success-08/events.redacted.jsonl",
-      "eventsSha256": "2b784356060bee2668a64f2afcaea1149b46594789fab77cbe633a2296285707",
+      "directory": "runs/release-live-8d30293-replay-success-08",
+      "summary": "runs/release-live-8d30293-replay-success-08/summary.json",
+      "summarySha256": "7eef952745795f6db79792ca9074e97231c0890ad733899840d2d75ab3c96c46",
+      "events": "runs/release-live-8d30293-replay-success-08/events.redacted.jsonl",
+      "eventsSha256": "c1ec37d73ae8a902d2efc8cea6b64e5885379beffdfe1bf3a1df83dc1b3261a1",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-08/screenshots/submission-live-qwen3-4b-replay-success-08-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-08/screenshots/release-live-8d30293-replay-success-08-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -196,17 +216,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-09",
+      "id": "release-live-8d30293-replay-success-09",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-09",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-09/summary.json",
-      "summarySha256": "950a8dd5213e49a2990320ce94e48a219aba63611f03dd3f26bddbd5b04d2444",
-      "events": "runs/submission-live-qwen3-4b-replay-success-09/events.redacted.jsonl",
-      "eventsSha256": "cfb72b40b59d0bc3beb6b42f0320580a321eb92c43ae50426890138b16a3648c",
+      "directory": "runs/release-live-8d30293-replay-success-09",
+      "summary": "runs/release-live-8d30293-replay-success-09/summary.json",
+      "summarySha256": "b0c9800b44468387196431ee48185a6640d8a362e180f90d7208e83e4a407b03",
+      "events": "runs/release-live-8d30293-replay-success-09/events.redacted.jsonl",
+      "eventsSha256": "d9290bbca16ed69549876970528155bdeebea61b58c4da6c02bb3f191b62d782",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-09/screenshots/submission-live-qwen3-4b-replay-success-09-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-09/screenshots/release-live-8d30293-replay-success-09-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -214,17 +234,17 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-success-10",
+      "id": "release-live-8d30293-replay-success-10",
       "kind": "replay",
       "scenario": "success",
-      "directory": "runs/submission-live-qwen3-4b-replay-success-10",
-      "summary": "runs/submission-live-qwen3-4b-replay-success-10/summary.json",
-      "summarySha256": "f6bcb17d437f6ff87921bb86211bd1bb3e4b0f3c764e030e5ac9d4d4b22b0a2e",
-      "events": "runs/submission-live-qwen3-4b-replay-success-10/events.redacted.jsonl",
-      "eventsSha256": "cf15d73ac87b66e33060e472eacb52a19167d3a28f5b12c693afa02063b5ab38",
+      "directory": "runs/release-live-8d30293-replay-success-10",
+      "summary": "runs/release-live-8d30293-replay-success-10/summary.json",
+      "summarySha256": "0d9f5d251e2b60eb520a4a3470e419fb62685dfaecbb200dde4696ba6e99f05b",
+      "events": "runs/release-live-8d30293-replay-success-10/events.redacted.jsonl",
+      "eventsSha256": "e7e7794021a364e534b7e1bc739a9d95e14c346db6d9e3d392f34e293b4cd6f9",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-success-10/screenshots/submission-live-qwen3-4b-replay-success-10-terminal-checkpoint.png",
+          "relativePath": "runs/release-live-8d30293-replay-success-10/screenshots/release-live-8d30293-replay-success-10-terminal-checkpoint.png",
           "sha256": "a97fc0f2d7face5b236150abca8e84daf8447b68b1f3d185c0980c7941ccfea7",
           "byteLength": 89299,
           "mimeType": "image/png"
@@ -232,19 +252,49 @@
       ]
     },
     {
-      "id": "submission-live-qwen3-4b-replay-not-found",
+      "id": "release-live-8d30293-replay-not-found",
       "kind": "replay",
       "scenario": "exception",
-      "directory": "runs/submission-live-qwen3-4b-replay-not-found",
-      "summary": "runs/submission-live-qwen3-4b-replay-not-found/summary.json",
-      "summarySha256": "b05300c94ae7f63cb9201feb0e1d4f6c04567930dc5741452638e9791d252e67",
-      "events": "runs/submission-live-qwen3-4b-replay-not-found/events.redacted.jsonl",
-      "eventsSha256": "f8285c0d9746a259c162d092b9780f3674050b833ef3fd2aaaabf430fba68bc9",
+      "directory": "runs/release-live-8d30293-replay-not-found",
+      "summary": "runs/release-live-8d30293-replay-not-found/summary.json",
+      "summarySha256": "6512f777116cf899993069e0c0df57b4d592e7fd9ca92533171371139d8862ee",
+      "events": "runs/release-live-8d30293-replay-not-found/events.redacted.jsonl",
+      "eventsSha256": "15855bbd859b382dcbf272d4c62cb763ef2fbe2f191878ded467f828bf52dc57",
       "screenshots": [
         {
-          "relativePath": "runs/submission-live-qwen3-4b-replay-not-found/screenshots/submission-live-qwen3-4b-replay-not-found-outcome-MEMBER_NOT_FOUND.png",
+          "relativePath": "runs/release-live-8d30293-replay-not-found/screenshots/release-live-8d30293-replay-not-found-outcome-MEMBER_NOT_FOUND.png",
           "sha256": "e6e362c5b0ab712652dbdeca093504c80f017240e632c393bbf8bf6eb30670cb",
           "byteLength": 57181,
+          "mimeType": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "release-handoff-8d30293",
+      "kind": "replay",
+      "scenario": "handoff",
+      "directory": "runs/release-handoff-8d30293",
+      "summary": "runs/release-handoff-8d30293/summary.json",
+      "summarySha256": "a71a52ee641ee1ddd5ad1b6c6d0e9b42bd8c1fe632721caaa32412181be212d2",
+      "events": "runs/release-handoff-8d30293/events.redacted.jsonl",
+      "eventsSha256": "a9ddf8679464e75880e0e82f3cea9a0b6f73138617a1de2969d209d8d0018aec",
+      "screenshots": [
+        {
+          "relativePath": "runs/release-handoff-8d30293/screenshots/release-handoff-8d30293-terminal-checkpoint.png",
+          "sha256": "b22049fd9429a75dfa49eee1721f40a6e56fcf2e66b030473eca458039572dcf",
+          "byteLength": 88088,
+          "mimeType": "image/png"
+        },
+        {
+          "relativePath": "runs/release-handoff-8d30293/screenshots/operator-capture-9746f582-90c7-45a2-9f7b-8acb3e59412a.png",
+          "sha256": "f0e06affe0e826ebc069ff88635a3db3a01f0096776a3ef5bf1c82fc2cd613dd",
+          "byteLength": 70377,
+          "mimeType": "image/png"
+        },
+        {
+          "relativePath": "runs/release-handoff-8d30293/screenshots/operator-capture-d3364151-4dc4-4a7f-b6a0-18bb1319c60f.png",
+          "sha256": "a01e81cd81df270b1d95780bc10a8eaf77afa1c8c7149157c9a249f4ab259369",
+          "byteLength": 59557,
           "mimeType": "image/png"
         }
       ]
